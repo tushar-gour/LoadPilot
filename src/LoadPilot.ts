@@ -12,7 +12,9 @@ class LoadPilot {
 
   addPool(pool: ServerPool): void {
     if (this.poolList.has(pool.category)) {
-      throw new Error(`A pool with category "${pool.category}" is already registered.`);
+      throw new Error(
+        `A pool with category "${pool.category}" is already registered.`,
+      );
     }
 
     this.poolList.set(pool.category, pool);
