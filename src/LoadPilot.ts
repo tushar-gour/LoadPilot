@@ -24,7 +24,7 @@ class LoadPilot {
   start(): void {
     this.httpServer?.listen(this.options.port, () => {
       console.log(
-        `${this.options.name} server live @ PORT :: ${this.options.port}`,
+        `${this.options.name} LoadPilot live @ PORT :: ${this.options.port}`,
       );
     });
   }

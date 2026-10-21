@@ -7,3 +7,6 @@ const pilot = new LoadPilot({
 });
 
 pilot.start();
+setTimeout(() => {
+  pilot.stop();
+}, 10000);
