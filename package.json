@@ -1,20 +1,23 @@
 {
   "name": "loadpilot",
-  "version": "1.0.0",
-  "description": "LoadPilot is a dynamic load balancing library, delivering smart, adaptive traffic distribution directly in your Node.js environment.",
-  "main": "index.ts",
-  "scripts": {
-    "test": "tsx tests/test.ts"
-  },
-  "keywords": [],
+  "version": "0.1.0",
+  "description": "Composable HTTP load balancing for Node.js (early development).",
   "type": "module",
-  "author": "",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "test": "tsx --test tests/test.ts",
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run build"
+  },
+  "keywords": ["load-balancer", "reverse-proxy", "http", "round-robin"],
   "license": "ISC",
   "devDependencies": {
     "@types/node": "^24.19.2",
-    "typescript": "^7.0.2"
-  },
-  "dependencies": {
+    "typescript": "^7.0.2",
     "tsx": "^4.23.15"
   }
 }

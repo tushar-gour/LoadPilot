@@ -1,47 +1,38 @@
-import { algorithm, Algorithm } from "./algorithms/Algorithms.js";
+import { Algorithm, Algorithms } from "./algorithms/Algorithms.js";
 import { Server } from "./Server.js";
+import { normalizeRoute } from "./routing/normalizeRoute.js";
 
+export interface ServerPoolOptions {
+  route: string;
+  servers?: readonly Server[];
+  algorithm?: Algorithm;
+}
+
+/** Owns its backend list and independent selection cursor. */
 class ServerPool {
-  currentIndex = 0;
+  readonly route: string;
+  readonly algorithm: Algorithm;
+  private readonly serverList: Server[];
+  private currentIndex = 0;
 
-  readonly serverList: Server[] = [];
-  readonly algorithm: algorithm = algorithm.ROUND_ROBIN;
-  readonly category: string;
-  readonly route: string = "/";
-
-  constructor(
-    category: string,
-    serverList: Server[] = [],
-    algo: algorithm = algorithm.ROUND_ROBIN,
-    route: string,
-  ) {
-    this.category = category;
-    this.serverList = serverList;
-    this.algorithm = algo;
-    this.route = route;
+  constructor(options: ServerPoolOptions) {
+    this.route = normalizeRoute(options.route);
+    this.algorithm = options.algorithm ?? Algorithm.ROUND_ROBIN;
+    this.serverList = [...(options.servers ?? [])];
   }
 
-  add(server: Server) {
-    // add a new server to the pool
+  add(server: Server): void {
     this.serverList.push(server);
   }
 
   getNextServer(): Server | null {
-    if (this.serverList.length === 0) {
-      return null; // if there is no server added to the pool
-    }
-
-    // get the current server instance and update the current index to the next index for next iteration
-    const server: Server = this.serverList[this.currentIndex];
-
-    // find the next server's index
-    this.currentIndex = Algorithm.getNextIndex(
+    if (this.serverList.length === 0) return null;
+    const server = this.serverList[this.currentIndex]!;
+    this.currentIndex = Algorithms.getNextIndex(
       this.algorithm,
       this.currentIndex,
       this.serverList.length,
     );
-
-    // return the selected server instance
     return server;
   }
 }

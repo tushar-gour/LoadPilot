@@ -1,18 +1,18 @@
 import RoundRobin from "./RoundRobin.js";
 
-enum algorithm {
-  ROUND_ROBIN,
+export enum Algorithm {
+  ROUND_ROBIN = "round-robin",
 }
 
-class Algorithms {
-  getNextIndex(algo: algorithm, currentIndex: number, totalItems: number) {
+class AlgorithmDispatcher {
+  getNextIndex(algo: Algorithm, currentIndex: number, totalItems: number): number {
     switch (algo) {
-      case algorithm.ROUND_ROBIN:
+      case Algorithm.ROUND_ROBIN:
         return RoundRobin.getNextIndex(currentIndex, totalItems);
+      default:
+        throw new Error(`Unsupported load balancing algorithm: ${String(algo)}`);
     }
   }
 }
 
-const Algorithm = new Algorithms();
-
-export { algorithm, Algorithm };
+export const Algorithms = new AlgorithmDispatcher();

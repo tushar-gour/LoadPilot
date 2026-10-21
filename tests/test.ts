@@ -1,126 +1,102 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-
 import { LoadPilot } from "../src/LoadPilot.js";
 import { Server } from "../src/Server.js";
 import { ServerPool } from "../src/ServerPool.js";
 
-// 1. Round Robin
+function pool(route: string, ...urls: string[]): ServerPool {
+  return new ServerPool({ route, servers: urls.map((url) => new Server(url)) });
+}
+
 test("Round Robin cycles through servers", () => {
-  const pool = new ServerPool("auth", [
-    new Server("server1"),
-    new Server("server2"),
-    new Server("server3"),
-  ]);
-
-  const results = Array.from(
-    { length: 7 },
-    () => pool.getNextServer()?.baseUrl,
-  );
-
-  assert.deepEqual(results, [
-    "server1",
-    "server2",
-    "server3",
-    "server1",
-    "server2",
-    "server3",
-    "server1",
+  const auth = pool("/auth", "http://localhost:3001", "http://localhost:3002", "http://localhost:3003");
+  const sequence = Array.from({ length: 7 }, () => auth.getNextServer()?.baseUrl);
+  assert.deepEqual(sequence, [
+    "http://localhost:3001", "http://localhost:3002", "http://localhost:3003",
+    "http://localhost:3001", "http://localhost:3002", "http://localhost:3003",
+    "http://localhost:3001",
   ]);
 });
 
-// 2. Independent pool state
-test("Pools rotate independently", () => {
-  const auth = new ServerPool("auth", [
-    new Server("auth1"),
-    new Server("auth2"),
-  ]);
-
-  const cart = new ServerPool("cart", [
-    new Server("cart1"),
-    new Server("cart2"),
-  ]);
-
-  assert.equal(auth.getNextServer()?.baseUrl, "auth1");
-  assert.equal(auth.getNextServer()?.baseUrl, "auth2");
-
-  assert.equal(cart.getNextServer()?.baseUrl, "cart1");
-
-  assert.equal(auth.getNextServer()?.baseUrl, "auth1");
-  assert.equal(cart.getNextServer()?.baseUrl, "cart2");
+test("Pools maintain independent rotation state", () => {
+  const auth = pool("/auth", "http://localhost:3001", "http://localhost:3002");
+  const cart = pool("/cart", "http://localhost:4001", "http://localhost:4002");
+  assert.equal(auth.getNextServer()?.baseUrl, "http://localhost:3001");
+  assert.equal(auth.getNextServer()?.baseUrl, "http://localhost:3002");
+  assert.equal(cart.getNextServer()?.baseUrl, "http://localhost:4001");
+  assert.equal(auth.getNextServer()?.baseUrl, "http://localhost:3001");
+  assert.equal(cart.getNextServer()?.baseUrl, "http://localhost:4002");
 });
 
-// 3. Empty pools
-test("Empty pool returns null", () => {
-  const pool = new ServerPool("empty");
-
-  assert.equal(pool.getNextServer(), null);
+test("Empty pool returns null and added backend participates", () => {
+  const auth = pool("/auth");
+  assert.equal(auth.getNextServer(), null);
+  auth.add(new Server("http://localhost:3001"));
+  assert.equal(auth.getNextServer()?.baseUrl, "http://localhost:3001");
 });
 
-// 4. Duplicate pool registration
-test("LoadPilot rejects duplicate categories", () => {
+test("ServerPool takes a snapshot of initial servers", () => {
+  const initial = [new Server("http://localhost:3001")];
+  const auth = new ServerPool({ route: "/auth", servers: initial });
+  initial.push(new Server("http://localhost:3002"));
+  assert.equal(auth.getNextServer()?.baseUrl, "http://localhost:3001");
+  assert.equal(auth.getNextServer()?.baseUrl, "http://localhost:3001");
+});
+
+test("Routes are normalized and invalid routes are rejected", () => {
+  assert.equal(pool("/auth/").route, "/auth");
+  assert.throws(() => pool("auth"), /Invalid route/);
+  assert.throws(() => pool("/auth?x=1"), /Invalid route/);
+  assert.throws(() => new Server("not-a-url"), /Invalid backend URL/);
+});
+
+test("LoadPilot constructor and addPool reject duplicate routes", () => {
   const pilot = new LoadPilot({
-    name: "TestPilot",
-    port: 18080,
-    route: "/",
+    name: "TestPilot", port: 18080, route: "/gateway/",
+    pools: [pool("/auth", "http://localhost:3001")],
   });
-
-  pilot.addPool(new ServerPool("auth"));
-
-  assert.throws(
-    () => pilot.addPool(new ServerPool("auth")),
-    /already registered/,
-  );
+  assert.equal(pilot.options.route, "/gateway");
+  pilot.addPool(pool("/cart", "http://localhost:4001"));
+  assert.throws(() => pilot.addPool(pool("/auth/")), /already registered/);
+  assert.throws(() => new LoadPilot({name: "Duplicate", port: 18086, pools: [pool("/x"),pool("/x")]}), /already registered/);
 });
 
-// 5. HTTP server lifecycle
-test("LoadPilot starts and serves HTTP requests", async () => {
-  const pilot = new LoadPilot({
-    name: "HTTPTest",
-    port: 18081,
-    route: "/",
-  });
-
+test("LoadPilot starts and responds to an HTTP request", async () => {
+  const pilot = new LoadPilot({ name: "HTTPTest", port: 18081 });
   await pilot.start();
-
   try {
     const response = await fetch("http://127.0.0.1:18081/");
-
     assert.equal(response.status, 200);
     assert.equal(await response.text(), "LoadPilot is running");
+    await assert.rejects(() => pilot.start(), /cannot start/);
   } finally {
     await pilot.stop();
   }
+  await pilot.stop();
 });
 
-// 6. Multiple independent LoadPilot instances
-test("Multiple LoadPilot instances serve independently", async () => {
-  const pilot1 = new LoadPilot({
-    name: "Pilot1",
-    port: 18082,
-    route: "/",
-  });
-
-  const pilot2 = new LoadPilot({
-    name: "Pilot2",
-    port: 18083,
-    route: "/",
-  });
-
+test("Multiple LoadPilot instances listen independently", async () => {
+  const first = new LoadPilot({ name: "First", port: 18082, pools: [pool("/auth")] });
+  const second = new LoadPilot({ name: "Second", port: 18083, pools: [pool("/auth")] });
   try {
-    await Promise.all([pilot1.start(), pilot2.start()]);
-
-    const [response1, response2] = await Promise.all([
+    await Promise.all([first.start(), second.start()]);
+    const responses = await Promise.all([
       fetch("http://127.0.0.1:18082/"),
       fetch("http://127.0.0.1:18083/"),
     ]);
-
-    assert.equal(response1.status, 200);
-    assert.equal(response2.status, 200);
-
-    assert.equal(await response1.text(), "LoadPilot is running");
-    assert.equal(await response2.text(), "LoadPilot is running");
+    assert.deepEqual(responses.map((r) => r.status), [200, 200]);
   } finally {
-    await Promise.all([pilot1.stop(), pilot2.stop()]);
+    await Promise.all([first.stop(), second.stop()]);
+  }
+});
+
+test("Port collisions reject start rather than hanging", async () => {
+  const first = new LoadPilot({ name: "First", port: 18084 });
+  const second = new LoadPilot({ name: "Second", port: 18084 });
+  await first.start();
+  try {
+    await assert.rejects(() => second.start(), { code: "EADDRINUSE" });
+  } finally {
+    await Promise.all([first.stop(), second.stop()]);
   }
 });
