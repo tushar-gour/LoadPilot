@@ -1,5 +1,6 @@
 import { ServerPool } from "./ServerPool.js";
 import { Server as HttpServer } from "node:http";
+import { once } from "node:events";
 
 interface LoadPilotOptions {
   name: string;
@@ -15,29 +16,30 @@ class LoadPilot {
   constructor(options: LoadPilotOptions) {
     this.options = options;
 
-    this.httpServer = new HttpServer((req, res) => {
+    this.httpServer = new HttpServer((_, res) => {
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end("LoadPilot is running");
     });
   }
 
   async start(): Promise<void> {
-    this.httpServer?.listen(this.options.port, () => {
-      console.log(
-        `${this.options.name} LoadPilot live @ PORT :: ${this.options.port}`,
-      );
-    });
+    this.httpServer.listen(this.options.port);
+    await once(this.httpServer, "listening");
+
+    console.log(`${this.options.name} started`);
   }
 
-  stop(): void {
-    this.httpServer.close((error) => {
-      if (error) {
-        console.error("Failed to stop LoadPilot:", error);
-        return;
-      }
+  async stop(): Promise<void> {
+    if (!this.httpServer.listening) return;
 
-      console.log(`${this.options.name} stopped successfully`);
+    await new Promise<void>((resolve, reject) => {
+      this.httpServer.close((error) => {
+        if (error) reject(error);
+        else resolve();
+      });
     });
+
+    console.log(`${this.options.name} stopped`);
   }
 
   addPool(pool: ServerPool): void {

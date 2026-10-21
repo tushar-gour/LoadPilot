@@ -7,15 +7,18 @@ class ServerPool {
   readonly serverList: Server[] = [];
   readonly algorithm: algorithm = algorithm.ROUND_ROBIN;
   readonly category: string;
+  readonly route: string = "/";
 
   constructor(
     category: string,
     serverList: Server[] = [],
     algo: algorithm = algorithm.ROUND_ROBIN,
+    route: string,
   ) {
     this.category = category;
     this.serverList = serverList;
     this.algorithm = algo;
+    this.route = route;
   }
 
   add(server: Server) {
