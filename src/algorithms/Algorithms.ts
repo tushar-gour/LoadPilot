@@ -1,4 +1,4 @@
-import RoundRobin from "./RoundRobin";
+import RoundRobin from "./RoundRobin.js";
 
 enum algorithm {
   ROUND_ROBIN,

@@ -4,7 +4,7 @@
   "description": "LoadPilot is a dynamic load balancing library, delivering smart, adaptive traffic distribution directly in your Node.js environment.",
   "main": "index.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "tsx tests/test.ts"
   },
   "keywords": [],
   "type": "module",

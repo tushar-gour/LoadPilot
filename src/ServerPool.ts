@@ -1,5 +1,5 @@
-import { algorithm, Algorithm } from "./algorithms/Algorithms";
-import { Server } from "./Server";
+import { algorithm, Algorithm } from "./algorithms/Algorithms.js";
+import { Server } from "./Server.js";
 
 class ServerPool {
   currentIndex = 0;
