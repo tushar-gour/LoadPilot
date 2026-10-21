@@ -1,0 +1,20 @@
+{
+  "name": "loadpilot",
+  "version": "1.0.0",
+  "description": "LoadPilot is a dynamic load balancing library, delivering smart, adaptive traffic distribution directly in your Node.js environment.",
+  "main": "index.ts",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "type": "module",
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "tsx": "^4.23.15"
+  }
+}
