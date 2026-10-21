@@ -33,7 +33,11 @@ assert.deepEqual(
 assert.equal(pool2.getNextServer()?.baseUrl, "pool 2 server A url");
 assert.equal(new ServerPool("empty").getNextServer(), null);
 
-const loadPilot = new LoadPilot({ port: 3000, route: "/" });
+const loadPilot = new LoadPilot({
+  name: "TestPilot",
+  port: 3000,
+  route: "/",
+});
 loadPilot.addPool(pool1);
 loadPilot.addPool(pool2);
 assert.throws(
@@ -42,7 +46,11 @@ assert.throws(
 );
 
 // A separate LoadPilot instance has its own registry.
-const anotherLoadPilot = new LoadPilot({ port: 3001, route: "/" });
+const anotherLoadPilot = new LoadPilot({
+  name: "TestPilot 2",
+  port: 3001,
+  route: "/",
+});
 assert.doesNotThrow(() => anotherLoadPilot.addPool(new ServerPool("auth")));
 
 console.log("All LoadPilot pool tests passed.");

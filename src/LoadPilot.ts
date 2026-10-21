@@ -21,7 +21,7 @@ class LoadPilot {
     });
   }
 
-  start(): void {
+  async start(): Promise<void> {
     this.httpServer?.listen(this.options.port, () => {
       console.log(
         `${this.options.name} LoadPilot live @ PORT :: ${this.options.port}`,
@@ -30,7 +30,14 @@ class LoadPilot {
   }
 
   stop(): void {
-    this.httpServer?.close();
+    this.httpServer.close((error) => {
+      if (error) {
+        console.error("Failed to stop LoadPilot:", error);
+        return;
+      }
+
+      console.log(`${this.options.name} stopped successfully`);
+    });
   }
 
   addPool(pool: ServerPool): void {
