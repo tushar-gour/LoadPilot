@@ -9,7 +9,9 @@ export function normalizeRoute(route: string): string {
     route.includes("//") ||
     /\s/.test(route)
   ) {
-    throw new Error(`Invalid route: ${String(route)}. Expected a path starting with '/'.`);
+    throw new Error(
+      `Invalid route: ${String(route)}. Expected a path starting with '/'.`,
+    );
   }
   return route.replace(/\/+$/, "") || "/";
 }

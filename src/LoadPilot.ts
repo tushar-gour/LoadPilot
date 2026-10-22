@@ -1,5 +1,5 @@
 import { Server as HttpServer } from "node:http";
-import { ServerPool } from "./ServerPool.js";
+import { ServerPool } from "./server/ServerPool.js";
 import { normalizeRoute } from "./routing/normalizeRoute.js";
 
 export interface LoadPilotOptions {
@@ -21,7 +21,11 @@ class LoadPilot {
 
   constructor(options: LoadPilotOptions) {
     if (!options.name.trim()) throw new Error("LoadPilot name is required.");
-    if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65535) {
+    if (
+      !Number.isInteger(options.port) ||
+      options.port < 0 ||
+      options.port > 65535
+    ) {
       throw new Error("LoadPilot port must be an integer between 0 and 65535.");
     }
     this.options = {
@@ -41,7 +45,9 @@ class LoadPilot {
 
   addPool(pool: ServerPool): void {
     if (this.poolList.has(pool.route)) {
-      throw new Error(`A pool with route "${pool.route}" is already registered.`);
+      throw new Error(
+        `A pool with route "${pool.route}" is already registered.`,
+      );
     }
     this.poolList.set(pool.route, pool);
   }

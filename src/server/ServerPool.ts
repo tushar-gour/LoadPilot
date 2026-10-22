@@ -1,6 +1,6 @@
-import { Algorithm, Algorithms } from "./algorithms/Algorithms.js";
+import { Algorithm, Algorithms } from "../algorithms/Algorithms.js";
 import { Server } from "./Server.js";
-import { normalizeRoute } from "./routing/normalizeRoute.js";
+import { normalizeRoute } from "../routing/normalizeRoute.js";
 
 export interface ServerPoolOptions {
   route: string;

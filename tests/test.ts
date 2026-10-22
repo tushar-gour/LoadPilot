@@ -1,19 +1,31 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { LoadPilot } from "../src/LoadPilot.js";
-import { Server } from "../src/Server.js";
-import { ServerPool } from "../src/ServerPool.js";
+import { Server } from "../src/server/Server.js";
+import { ServerPool } from "../src/server/ServerPool.js";
 
 function pool(route: string, ...urls: string[]): ServerPool {
   return new ServerPool({ route, servers: urls.map((url) => new Server(url)) });
 }
 
 test("Round Robin cycles through servers", () => {
-  const auth = pool("/auth", "http://localhost:3001", "http://localhost:3002", "http://localhost:3003");
-  const sequence = Array.from({ length: 7 }, () => auth.getNextServer()?.baseUrl);
+  const auth = pool(
+    "/auth",
+    "http://localhost:3001",
+    "http://localhost:3002",
+    "http://localhost:3003",
+  );
+  const sequence = Array.from(
+    { length: 7 },
+    () => auth.getNextServer()?.baseUrl,
+  );
   assert.deepEqual(sequence, [
-    "http://localhost:3001", "http://localhost:3002", "http://localhost:3003",
-    "http://localhost:3001", "http://localhost:3002", "http://localhost:3003",
+    "http://localhost:3001",
+    "http://localhost:3002",
+    "http://localhost:3003",
+    "http://localhost:3001",
+    "http://localhost:3002",
+    "http://localhost:3003",
     "http://localhost:3001",
   ]);
 });
@@ -52,13 +64,23 @@ test("Routes are normalized and invalid routes are rejected", () => {
 
 test("LoadPilot constructor and addPool reject duplicate routes", () => {
   const pilot = new LoadPilot({
-    name: "TestPilot", port: 18080, route: "/gateway/",
+    name: "TestPilot",
+    port: 18080,
+    route: "/gateway/",
     pools: [pool("/auth", "http://localhost:3001")],
   });
   assert.equal(pilot.options.route, "/gateway");
   pilot.addPool(pool("/cart", "http://localhost:4001"));
   assert.throws(() => pilot.addPool(pool("/auth/")), /already registered/);
-  assert.throws(() => new LoadPilot({name: "Duplicate", port: 18086, pools: [pool("/x"),pool("/x")]}), /already registered/);
+  assert.throws(
+    () =>
+      new LoadPilot({
+        name: "Duplicate",
+        port: 18086,
+        pools: [pool("/x"), pool("/x")],
+      }),
+    /already registered/,
+  );
 });
 
 test("LoadPilot starts and responds to an HTTP request", async () => {
@@ -76,15 +98,26 @@ test("LoadPilot starts and responds to an HTTP request", async () => {
 });
 
 test("Multiple LoadPilot instances listen independently", async () => {
-  const first = new LoadPilot({ name: "First", port: 18082, pools: [pool("/auth")] });
-  const second = new LoadPilot({ name: "Second", port: 18083, pools: [pool("/auth")] });
+  const first = new LoadPilot({
+    name: "First",
+    port: 18082,
+    pools: [pool("/auth")],
+  });
+  const second = new LoadPilot({
+    name: "Second",
+    port: 18083,
+    pools: [pool("/auth")],
+  });
   try {
     await Promise.all([first.start(), second.start()]);
     const responses = await Promise.all([
       fetch("http://127.0.0.1:18082/"),
       fetch("http://127.0.0.1:18083/"),
     ]);
-    assert.deepEqual(responses.map((r) => r.status), [200, 200]);
+    assert.deepEqual(
+      responses.map((r) => r.status),
+      [200, 200],
+    );
   } finally {
     await Promise.all([first.stop(), second.stop()]);
   }

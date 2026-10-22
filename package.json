@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc",
     "test": "tsx --test tests/test.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p tsconfig.test.json",
     "prepack": "npm run build"
   },
   "keywords": ["load-balancer", "reverse-proxy", "http", "round-robin"],
