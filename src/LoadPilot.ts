@@ -4,6 +4,8 @@ import { normalizeRoute } from "./routing/normalizeRoute.js";
 import { routeMatcher } from "./routing/RouteMatcher.js";
 import { HttpProxy, sendError } from "./proxy/HttpProxy.js";
 import type { Duplex } from "node:stream";
+import { MetricsCollector, resolveMetrics } from "./metrics/MetricsCollector.js";
+import type { LoadPilotMetrics, MetricsOptions } from "./metrics/MetricsTypes.js";
 
 export interface LoadPilotOptions {
   name: string;
@@ -14,6 +16,8 @@ export interface LoadPilotOptions {
   pools?: readonly ServerPool[];
   /** Total proxy exchange deadline in milliseconds (default: 30,000). */
   upstreamTimeoutMs?: number;
+  /** Optional in-process observability, disabled by default. */
+  metrics?: MetricsOptions;
 }
 
 type LifecycleState = "stopped" | "starting" | "started" | "stopping";
@@ -22,9 +26,11 @@ class LoadPilot {
   private readonly poolList = new Map<string, ServerPool>();
   private readonly httpServer: HttpServer;
   private readonly proxy: HttpProxy;
+  private readonly metricsCollector: MetricsCollector;
   private state: LifecycleState = "stopped";
   readonly options: Readonly<{
     name: string; port: number; route: string; upstreamTimeoutMs: number;
+    metrics: Readonly<Required<MetricsOptions>>;
   }>;
 
   constructor(options: LoadPilotOptions) {
@@ -45,8 +51,10 @@ class LoadPilot {
       port: options.port,
       route: normalizeRoute(options.route ?? "/"),
       upstreamTimeoutMs,
+      metrics: resolveMetrics(options.metrics),
     });
     this.proxy = new HttpProxy(upstreamTimeoutMs);
+    this.metricsCollector = new MetricsCollector(options.name, this.options.metrics.enabled);
 
     for (const pool of options.pools ?? []) this.addPool(pool);
 
@@ -71,13 +79,18 @@ class LoadPilot {
     return address && typeof address !== "string" ? address.port : null;
   }
 
+  /** Frozen operational snapshots for trusted application code. No HTTP endpoint. */
+  getMetrics(): LoadPilotMetrics { return this.metricsCollector.snapshot(); }
+
   private handleRequest(req: IncomingMessage, res: ServerResponse): void {
+    const observe = this.options.metrics.enabled ? this.metricsCollector.begin(res) : undefined;
     // Only origin-form targets are accepted. Keep raw escapes, slashes and query
     // bytes: WHATWG URL parsing would normalize dot segments before routing.
     const target = req.url ?? "";
     if (!target.startsWith("/") || target.startsWith("//") ||
         /[\s\x00-\x1f\x7f\\#]/.test(target) || /%(?![\da-f]{2})/i.test(target)) {
       req.resume();
+      observe?.({ type: "rejected", reason: "invalidTarget" });
       sendError(res, 400);
       return;
     }
@@ -87,21 +100,26 @@ class LoadPilot {
       const pool = routeMatcher.getServerPoolFromRoute(pathname, this.options.route, this.poolList);
       if (!pool) {
         req.resume();
+        observe?.({ type: "rejected", reason: "routeNotFound" });
         sendError(res, 404);
         return;
       }
+      observe?.({ type: "pool", pool });
       const server = pool.getNextServer();
       if (!server) {
         req.resume();
+        observe?.({ type: "rejected", reason: "noEligibleBackend" });
         sendError(res, 503);
         return;
       }
+      observe?.({ type: "selected", server });
       const path = this.options.route === "/" ? pathname : pathname.slice(this.options.route.length) || "/";
       const query = queryIndex < 0 ? "" : target.slice(queryIndex);
       this.proxy.forward(req, res, server, path + query, this.options.route,
-        () => pool.reportTransportFailure(server));
+        () => pool.reportTransportFailure(server), observe);
     } catch {
       req.resume();
+      observe?.({ type: "rejected", reason: "internalErrors" });
       sendError(res, 500);
     }
   }
@@ -113,6 +131,7 @@ class LoadPilot {
       );
     }
     this.poolList.set(pool.route, pool);
+    this.metricsCollector.registerPool(pool);
     if (this.state === "started") pool.startHealthChecks(this);
   }
 
@@ -143,6 +162,7 @@ class LoadPilot {
         }
       });
       this.state = "started";
+      this.metricsCollector.started();
       for (const pool of this.poolList.values()) pool.startHealthChecks(this);
       console.log(`${this.options.name} started`);
     } catch (error) {
@@ -157,6 +177,7 @@ class LoadPilot {
       throw new Error(`${this.options.name} cannot stop while ${this.state}.`);
     }
     this.state = "stopping";
+    this.metricsCollector.shutdown();
     for (const pool of this.poolList.values()) pool.stopHealthChecks(this);
     try {
       await new Promise<void>((resolve, reject) => {
@@ -170,6 +191,7 @@ class LoadPilot {
         this.httpServer.closeAllConnections();
       });
       this.state = "stopped";
+      this.metricsCollector.stopped();
       console.log(`${this.options.name} stopped`);
     } catch (error) {
       this.state = "started";

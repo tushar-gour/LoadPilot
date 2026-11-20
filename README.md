@@ -10,11 +10,12 @@ Client → LoadPilot listener → RouteMatcher → ServerPool.getNextServer()
 Client ← streamed status, headers and body ← HttpProxy ← backend
 ```
 
-- `LoadPilot` owns one HTTP listener, an optional public base route and its pool registry.
+- `LoadPilot` owns one HTTP listener, an optional public base route and its pool registry, and exposes optional instance metrics.
 - `RouteMatcher` selects the longest matching pool route at complete path-segment boundaries. It has no networking or scheduling responsibilities.
 - `ServerPool` owns its backend list, Round Robin cursor and optional health monitor. Its default algorithm is `Algorithm.ROUND_ROBIN`.
 - `Server` represents a validated HTTP(S) destination, optionally including a path prefix. Credentials, query strings and fragments are rejected in backend configuration.
 - The internal `HttpProxy` manages transport, header filtering, redirects, streaming, deadlines and cancellation. It does not select backends.
+- An internal per-instance `MetricsCollector` observes the existing lifecycle through scoped callbacks. It makes no routing, selection or health decisions and has no global registry.
 
 Each pool starts with its first eligible backend and rotates through registration order. Health checks are disabled by default, preserving selection of all registered backends. An unrelated pool's requests do not advance its cursor. Different LoadPilot objects have independent listeners and registries. **Use distinct ServerPool objects for independent scheduling and health state**: intentionally sharing a pool object also shares its cursor, backend list and single health monitor.
 
@@ -208,9 +209,119 @@ Passive application transport signals such as connection refusal/reset, DNS fail
 
 `pool.remove(server)` removes the first registration of that exact Server object and returns whether it existed. Once its last registration is removed, pending probes/timers are cancelled and the health record is removed. Late results cannot recreate the record or affect a subsequently re-added backend. Removing a backend does not cancel application requests already using it.
 
-Repeated initialization does not create duplicate monitors. Shared pool objects retain one monitor while any owning LoadPilot listener is running; stopping one listener releases only its ownership. Stopping the final owner cancels pending probes and timers without treating cancellation as failure. Last-known diagnostics remain visible while stopped. A fresh start resets states/counters to UNKNOWN and schedules new probes; adding another owner to an already running monitor does not reset it. Monitoring lifecycle and passive-signal methods marked `@internal` are managed by LoadPilot and need no consumer calls.
+Repeated initialization does not create duplicate monitors. Shared pool objects retain one monitor while any owning LoadPilot listener is running; stopping one listener releases only its ownership. Stopping the final owner cancels pending probes and timers without treating cancellation as failure. Last-known diagnostics remain visible while stopped. A fresh start resets states to UNKNOWN and consecutive streak counters to zero, then schedules new probes; adding another owner to an already running monitor does not reset it. Observability totals described below are retained across restarts. Monitoring lifecycle and passive-signal methods marked `@internal` are managed by LoadPilot and need no consumer calls.
 
 Health monitoring has no configurable probe headers/authentication, custom method/status policy, body assertions, redirect following, jitter, global probe concurrency cap, distributed coordination or automatic failover replay. Use a dedicated bounded health endpoint appropriate for the application.
+
+## Observability & Metrics
+
+Metrics are **disabled by default** and require no monitoring service, runtime dependency or HTTP endpoint. Enable them on each LoadPilot instance:
+
+```ts
+import { LoadPilot, ServerPool, Server, type LoadPilotMetrics } from "loadpilot";
+
+const authPool = new ServerPool({
+  route: "/auth",
+  servers: [new Server("http://localhost:3001"), new Server("http://localhost:3002")],
+  healthCheck: { enabled: true },
+});
+const pilot = new LoadPilot({
+  name: "Gateway",
+  port: 8080,
+  pools: [authPool],
+  metrics: { enabled: true },
+});
+await pilot.start();
+
+const snapshot: LoadPilotMetrics = pilot.getMetrics();
+console.log(snapshot.requests.total);
+console.log(snapshot.requests.active);
+console.log(snapshot.latency.p95Ms);
+for (const pool of snapshot.pools) {
+  console.log(pool.route, pool.requests.noEligibleBackend, pool.eligibility.eligible);
+  for (const backend of pool.backends) {
+    console.log(backend.id, backend.requests.total, backend.health?.state);
+  }
+}
+// Later: await pilot.stop();
+```
+
+`metrics` accepts an optional boolean `enabled` field, defaulting to false. Invalid objects or non-boolean values are rejected. The resolved option is frozen. `getMetrics()` always returns a deeply frozen snapshot, including before startup. Empty counters and latency values are zero; timestamps are null before an observed event. Older snapshots never change and cannot mutate future measurements.
+
+### Request accounting and status origin
+
+The instance, each configured pool and each selected backend expose the same request/status/latency structure. Instance totals count incoming requests that reach the HTTP request handler, including malformed targets handled there. HTTP parser rejections and CONNECT/Upgrade rejections occur outside that handler and are excluded. Backend health probes are never client requests.
+
+| Field | Meaning |
+|---|---|
+| `requests.total` | Handler entries; pool entries only after matching; backend entries only after selection |
+| `requests.active` | Accepted exchanges that have not reached their terminal outcome; **not TCP connections** |
+| `requests.completed` | Complete application responses, including backend 4xx/5xx, and completed local 400/404/503 rejections |
+| `requests.failed` | Forwarding connection/protocol/stream failures, upstream deadlines, or internal orchestration failures |
+| `requests.cancelled` | Exchanges cancelled by a client or shutdown, with separate `clientCancelled` and `shutdownCancelled` counters |
+| `requests.routeNotFound`, `noEligibleBackend`, `invalidTarget` | Terminal local rejection reasons, distinct from backend HTTP statuses |
+| `requests.upstreamFailures`, `upstreamTimeouts`, `internalErrors` | Terminal failure reasons; backend HTTP 500 is not an upstream failure |
+| `responses.completed` | Fully written downstream responses, including fully written proxy-generated 502/504 responses |
+| `responses.incomplete` | Exchanges ending without a complete downstream response, including cancellation before headers |
+
+Each accepted request has one guarded accounting scope. Exactly one terminal category is recorded and active gauges decrement once, even when finish/close/error/aborted events overlap. In ordinary operation:
+
+```text
+requests.total = requests.active + requests.completed + requests.failed + requests.cancelled
+```
+
+The first observed forwarding failure or cancellation determines its reason. A later socket error caused by timeout, disconnect or shutdown does not become another failure. Shutdown finalizes already-destroyed responses even if Node defers their `close` events past server closure. Instrumentation callback failures are isolated from transport and reflected in `instrumentationErrors`; counters may be partial when instrumentation itself fails.
+
+Final status families are `responses.status1xx` through `status5xx`, with separate `responses.backend` and `responses.loadPilot` breakdowns. Statuses are counted **only for completed downstream responses**. A backend 500 increments the backend 5xx family and `requests.completed`; a successfully written local 502 increments the LoadPilot 5xx family and `requests.failed`. An upstream stream failure after sending 200 headers increments `responses.incomplete`, not the completed 2xx family and not a fabricated 502 response. Informational responses are not relayed/observed by this instrumentation, including Node's automatic 100 Continue; `status1xx` remains zero. Nonstandard statuses outside 100–599 still count as completed responses without a standard family.
+
+Node's response `finish` means bytes have been handed to the network stack; it does not prove that a remote client processed every byte. Active exchanges remain active throughout upload and downstream streaming/backpressure.
+
+### Latency distributions
+
+All durations use monotonic `performance.now()` and milliseconds:
+
+- `latency` measures handler entry through downstream finish/close, including upload, routing, upstream work, response streaming, errors and cancellations. Pool/backend summaries use that same end-to-end exchange duration.
+- `upstreamHeadersLatency` measures upstream dispatch through receipt of response headers, including DNS/connect/TLS/upload and upstream work. It is **not pure backend processing time**. It includes observed responses that later truncate; failures before headers have no headers-latency sample.
+- Both summaries expose `count`, `totalMs`, `averageMs`, `minMs`, `maxMs`, `p50Ms`, `p95Ms`, `p99Ms`, and fixed histogram `buckets`.
+
+Histograms use these inclusive upper bounds in milliseconds:
+
+```text
+1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000,
+10000, 30000, 60000, 120000, 300000, 600000, 1800000, 3600000
+```
+
+There are always **21 counters**, including one overflow bucket represented by `upperBoundMs: null`. Updates use a bounded binary search. Percentiles use the bucket containing the nearest rank `ceil(p × count)`, reported as that bucket's upper bound clamped to the actual observed minimum/maximum. Overflow percentiles use the observed maximum. These are deterministic **upper-bound approximations**, not exact quantiles; long-tail precision is limited by the bucket spacing. Actual average/minimum/maximum do not use bucket estimates. Empty summaries return zero; extreme duration inputs are capped at `Number.MAX_SAFE_INTEGER` milliseconds.
+
+### Pool/backend identities and retention
+
+Pools use normalized configured routes, never arbitrary client paths, queries or Host headers. Overlapping routes and `/` fallback attribution follow the actual RouteMatcher result. Requests rejected before matching have no pool attribution, and requests rejected before backend selection have no backend attribution.
+
+Each backend row has a per-pool numeric `id`, configured `baseUrl`, `registered` flag and `registrations` count. Distinct Server objects with identical URLs have different IDs. Repeated registration of the same Server object shares a row/health record; `registrations` reports its selection slots. IDs are stable for one continuous registration lifetime and are interpreted together with the pool route.
+
+`pool.eligibility` reports `registered` distinct Server objects, total registration slots, UNKNOWN/HEALTHY/UNHEALTHY counts, and selectable (`eligible`) distinct objects. UNKNOWN remains eligible; disabled health monitoring reports UNKNOWN rather than confirmed HEALTHY.
+
+Removing the last registration removes an idle backend row immediately. A removed backend with selected requests still in flight appears with `registered: false`, zero registrations and null health until those requests settle; then its row disappears. Re-adding the same Server object receives a new ID and fresh backend counters, even while old requests are finishing. Those old requests settle against the old identity. Pool/instance request aggregates retain their lifetime totals. Current identities use weak-key bookkeeping; only active exchanges retain removed identities. There is no unlimited historical backend list.
+
+### Health metrics and shared pools
+
+`pool.health` exposes actual shared-monitor totals: `successfulProbes`, `failedProbes`, `timeoutProbes` (a subset of failures), `healthyTransitions`, `unhealthyTransitions`, `unknownTransitions`, `lastProbeAt` and `lastStateChangeAt`. `enabled` describes active-health configuration; `collecting` indicates whether health statistics have been opted into. Each registered `backend.health` adds its actual `HealthState` and counters for that registration lifetime. Timestamps are Unix epoch milliseconds, separate from monotonic duration measurements.
+
+Only real probe outcomes are counted. Cancellation and stale results after removal/shutdown have no probe outcome. State-transition counters increment only when the actual state changes: repeated healthy results and failures below the threshold do not invent transitions. A fresh monitor start returning a previously known state to UNKNOWN is an UNKNOWN transition. Consecutive health streaks still follow the existing threshold rules.
+
+Health statistics collection is an idempotent, pool-lifetime opt-in when the first metrics-enabled LoadPilot registers the pool. It does not start probes, add subscriptions or change monitoring ownership. Events before that opt-in are not reconstructed. Collection remains enabled for that pool thereafter, including when another non-metrics owner keeps monitoring alive. Pool health totals retain outcomes from removed backends without retaining their objects; removing/re-adding resets only that backend's health statistics.
+
+**Request counters belong to the receiving LoadPilot. Health counters belong to the actual pool monitor.** Two instances sharing a pool have independent request counters and the same read-only health totals, not doubled probes. Do not sum those duplicate shared-monitor views as independent health traffic. A metrics-disabled instance still exposes current topology/health views if another owner enabled collection, but its own request counters stay zero.
+
+### Lifetime, overhead and exposure
+
+Request counters live for the LoadPilot object's lifetime. `stop()` retains them and returns with active gauges zero; restarting resumes accumulation. `uptimeMs` is cumulative bound-listener running time and excludes downtime. There is no reset API, rolling time window or percentile-history retention. Health totals follow the separate pool/registration lifetimes above.
+
+When disabled, requests allocate no metrics scope/events and capture no metrics timestamps. Enabled collection uses counters and fixed histograms; snapshots are materialized only on `getMetrics()`. Memory scales with configured pools/backends plus active removed-backend exchanges, not request count or unique URLs. No metrics polling timers, blocking I/O, disk writes, network collection, automatic request logging or additional dependencies are introduced. Snapshot generation scans current configuration/active retired identities and fixed-size buckets. No measured overhead or throughput guarantee is claimed.
+
+Snapshots include configured names, routes and backend addresses for **trusted operational code**. They do not store client headers, authorization, cookies, bodies, query strings, arbitrary client paths or incoming Host values. Do not publish raw snapshots to untrusted clients. LoadPilot does not expose `/metrics` automatically.
+
+Prometheus/OpenTelemetry exporters, tracing, TCP connection gauges, persistence, dashboards, distributed aggregation and alerting are not implemented. Active request counts are supported; they must not be interpreted as active TCP connections. Dedicated sustained load, fault-injection and resource-leak validation are still needed for production reliability claims.
 
 ## Limitations
 
@@ -218,7 +329,7 @@ Health monitoring has no configurable probe headers/authentication, custom metho
 - HTTP Upgrade/WebSocket and CONNECT tunneling are rejected with 501. Unexpected upstream upgrades produce 502.
 - No cookie/body/refresh rewriting, forwarding of trailers, informational-response relay, or trusted multi-proxy configuration.
 - Redirect rewriting requires an exact selected-backend origin and a path inside its configured prefix, as described above.
-- No automatic failover/retries, weighted scheduling, circuit breakers, metrics, clustering or graceful shutdown draining.
+- No automatic failover/retries, weighted scheduling, circuit breakers, external metrics exporters, clustering or graceful shutdown draining.
 - The listener uses Node's default bind address; network exposure is controlled by the host environment.
 
 ## Development and verification
@@ -231,6 +342,6 @@ npm run build
 npm pack --dry-run --cache .npm
 ```
 
-`typecheck` covers source and tests. Tests use Node's test/assert libraries and real local HTTP/HTTPS backends on allocated ports. They exercise routing, verbs, headers/cookies, Round Robin, independent listeners, dynamic registration, failures, deadlines, disconnects, incremental streams and an 8 MiB upload. Health tests control probe timers with Node's test timer mocks while exercising real network streams, including thresholds, recovery, no overlap, stale-result protection, passive signals, shared ownership and process-exit cleanup. The localhost TLS certificate/key under `tests/fixtures` are public test-only material; regenerate them when expired. TLS tests temporarily add that certificate to their test process's trust list and restore it afterward.
+`typecheck` covers source and tests. Tests use Node's test/assert libraries and real local HTTP/HTTPS backends on allocated ports. They exercise routing, verbs, headers/cookies, Round Robin, independent listeners, dynamic registration, failures, deadlines, disconnects, incremental streams and an 8 MiB upload. Health tests control probe timers with Node's test timer mocks while exercising real network streams, including thresholds, recovery, no overlap, stale-result protection, passive signals, shared ownership and process-exit cleanup. Metrics tests cover exactly-once outcomes, concurrency, local/backend status origin, cancellations, histograms, immutable snapshots, identity churn, health statistics, disabled/enabled streaming, instrumentation fault isolation, shutdown/restart retention and process exit. The localhost TLS certificate/key under `tests/fixtures` are public test-only material; regenerate them when expired. TLS tests temporarily add that certificate to their test process's trust list and restore it afterward.
 
 Source lives under `src/`; the published package contains generated JavaScript/declarations in `dist/` and this README. Internal transport and routing helpers are not package exports. For native connection semantics, see the [Node.js HTTP documentation](https://nodejs.org/api/http.html).

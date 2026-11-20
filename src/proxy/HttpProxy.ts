@@ -5,6 +5,23 @@ import {
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import type { Server } from "../server/Server.js";
 
+export type ProxyEvent =
+  { type: "response"; statusCode: number; headersMs: number } |
+  { type: "completed" } |
+  { type: "failure"; reason: "upstream" | "timeout" } |
+  { type: "cancelled"; reason: "client" | "shutdown" };
+export type ProxyObserver = (event: ProxyEvent) => void;
+
+function notify(observer: ProxyObserver | undefined, event: ProxyEvent): void {
+  if (!observer) return;
+  try { observer(event); }
+  catch {
+    // Only optional instrumentation is isolated; transport errors keep their
+    // existing handlers and must never become telemetry callback errors.
+    return;
+  }
+}
+
 const hopByHop = new Set([
   "connection", "keep-alive", "proxy-connection", "transfer-encoding", "te",
   "trailer", "upgrade", "proxy-authenticate", "proxy-authorization",
@@ -77,7 +94,8 @@ export class HttpProxy {
    * Deliberately returns void: every asynchronous event has a managed handler.
    */
   forward(req: IncomingMessage, res: ServerResponse, server: Server, path: string, baseRoute: string,
-    onTransportFailure?: () => void): void {
+    onTransportFailure?: () => void, observer?: ProxyObserver): void {
+    const started = observer ? performance.now() : 0;
     const backend = new URL(server.baseUrl);
     const upstreamPath = backend.pathname.replace(/\/+$/, "") + path;
     const headers = endToEndHeaders(req.headers);
@@ -109,7 +127,7 @@ export class HttpProxy {
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
-      this.active.delete(cancel);
+      this.active.delete(shutdownCancel);
       req.unpipe(upstream);
       response?.unpipe(res);
       // A fully parsed message can still have unread buffered data. Destroy it
@@ -118,12 +136,17 @@ export class HttpProxy {
       if (response && !response.readableEnded) response.destroy();
       if (!req.readableEnded && !req.destroyed) req.resume();
     };
-    const cancel = () => {
+    const cancel = (reason: "client" | "shutdown") => {
+      if (settled) return;
+      if (observer) notify(observer, { type: "cancelled", reason });
       finish();
       if (!res.destroyed) res.destroy();
     };
+    const clientCancel = () => cancel("client");
+    const shutdownCancel = () => cancel("shutdown");
     const fail = (status: number, transportFailure = false) => {
       if (settled) return;
+      if (observer) notify(observer, { type: "failure", reason: status === 504 ? "timeout" : "upstream" });
       finish();
       if (transportFailure) onTransportFailure?.();
       sendError(res, status);
@@ -132,12 +155,16 @@ export class HttpProxy {
     // socket inactivity timeouts alone do not bound all those phases.
     const deadline = setTimeout(() => fail(504), this.timeoutMs);
     deadline.unref();
-    this.active.add(cancel);
-    req.once("aborted", cancel);
-    req.once("error", cancel);
-    res.once("error", cancel);
-    res.once("finish", finish);
-    res.once("close", () => { if (!res.writableFinished) cancel(); });
+    this.active.add(shutdownCancel);
+    req.once("aborted", clientCancel);
+    req.once("error", clientCancel);
+    res.once("error", clientCancel);
+    res.once("finish", () => {
+      if (settled) return;
+      if (observer) notify(observer, { type: "completed" });
+      finish();
+    });
+    res.once("close", () => { if (!res.writableFinished) clientCancel(); });
     upstream.once("error", (error: NodeJS.ErrnoException) => fail(502, transportErrors.has(error.code ?? "")));
     upstream.once("upgrade", (_message, socket) => {
       socket.destroy();
@@ -152,6 +179,7 @@ export class HttpProxy {
         message.destroy();
         return;
       }
+      if (observer) notify(observer, { type: "response", statusCode: message.statusCode ?? 502, headersMs: performance.now() - started });
       try {
         const responseHeaders = endToEndHeaders(message.headers);
         if (responseHeaders.location !== undefined) {

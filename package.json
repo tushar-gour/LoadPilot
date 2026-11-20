@@ -10,7 +10,7 @@
   "scripts": {
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc",
-    "test": "tsx --test tests/test.ts tests/proxy.test.ts tests/health.test.ts",
+    "test": "tsx --test tests/test.ts tests/proxy.test.ts tests/health.test.ts tests/metrics.test.ts",
     "typecheck": "tsc -p tsconfig.test.json",
     "prepack": "npm run build"
   },
