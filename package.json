@@ -8,13 +8,15 @@
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
   "files": ["dist"],
   "scripts": {
+    "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc",
-    "test": "tsx --test tests/test.ts",
+    "test": "tsx --test tests/test.ts tests/proxy.test.ts tests/health.test.ts",
     "typecheck": "tsc -p tsconfig.test.json",
     "prepack": "npm run build"
   },
   "keywords": ["load-balancer", "reverse-proxy", "http", "round-robin"],
   "license": "ISC",
+  "engines": { "node": ">=22.19.0" },
   "devDependencies": {
     "@types/node": "^24.19.2",
     "typescript": "^7.0.2",

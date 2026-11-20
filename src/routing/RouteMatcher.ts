@@ -6,6 +6,9 @@ class RouteMatcher {
     baseRoute: string,
     pools: ReadonlyMap<string, ServerPool>,
   ): ServerPool | null {
+    const queryIndex = pathname.indexOf("?");
+    if (queryIndex >= 0) pathname = pathname.slice(0, queryIndex);
+    if (!pathname.startsWith("/")) return null;
     // match exact routes or complete path-segment prefixes.
     const matchesRoute = (path: string, route: string): boolean => {
       return route === "/" || path === route || path.startsWith(`${route}/`);
