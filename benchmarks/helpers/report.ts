@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { median } from "./statistics.js";
+import { highestPassing } from "./analysis.js";
 import type { BenchmarkReport } from "../types.js";
 
 export function environmentInfo(gc: boolean): BenchmarkReport["environment"] {
@@ -25,10 +26,22 @@ export function validateReport(value: BenchmarkReport): void {
       if (resource && resource.samples.length > 600) throw new Error("Unbounded resource report");
     }
   }
+  for (const run of value.memory ?? []) {
+    if (run.checkpoints.length > 600 || !Number.isFinite(run.actualLoadMs) || run.actualLoadMs < 0) throw new Error("Invalid memory run");
+    if (run.attempted !== run.completed + run.failed + run.cancelled || run.latencyMs.count !== run.attempted) throw new Error("Invalid memory accounting");
+    for (const point of run.checkpoints) for (const key of ["rss", "heapUsed", "heapTotal", "external", "arrayBuffers"] as const) if (!Number.isFinite(point.sample[key]) || point.sample[key] < 0) throw new Error("Invalid checkpoint");
+  }
+  for (const run of value.capacity ?? []) {
+    const result = run.result;
+    if (result.attempted !== result.completed + result.failed + result.cancelled || result.attempted + result.missedArrivals !== result.scheduled) throw new Error("Invalid capacity accounting");
+    if (result.scheduleLatencyMs.count !== result.attempted || result.latencyMs.count !== result.attempted || result.headersLatencyMs.count > result.attempted) throw new Error("Invalid capacity latency population");
+    if (result.peakConcurrency > run.concurrency || result.missedScheduling + result.missedConcurrency !== result.missedArrivals) throw new Error("Invalid capacity scheduling");
+    if (![result.requestsPerSecond, result.attemptedPerSecond, result.scheduleLatencyMs.p99].every(Number.isFinite)) throw new Error("Nonfinite capacity result");
+  }
 }
 
 export function markdown(report: BenchmarkReport): string {
-  const lines = ["# LoadPilot benchmark report", "", `Run: ${report.timestamp}; status: **${report.passed ? "PASS" : "FAIL"}**`, "",
+  const lines = ["# LoadPilot benchmark report", "", `Run: ${report.timestamp}; status: **${report.passed ? "PASS" : "FAIL"}**; execution: ${report.executionStatus ?? "completed"}`, "",
     "## Environment", "", `- ${report.environment.platform} ${report.environment.osRelease}; ${report.environment.cpu}; ${report.environment.logicalCpus} logical CPUs`,
     `- RAM ${(report.environment.totalRamBytes / 1024 ** 3).toFixed(1)} GiB; Node ${report.environment.node}`,
     `- Source commit ${report.environment.gitCommit}; working tree dirty: ${report.environment.workingTreeDirty}; explicit GC: ${report.environment.gcExposed}`,
@@ -63,6 +76,42 @@ export function markdown(report: BenchmarkReport): string {
     lines.push(`- ${run.mode}: ${(run.actualDurationMs / 1000).toFixed(2)} seconds, ${run.cycles} batches, workloads ${run.workloads.join(", ")}.`,
       `  Initial/final RSS MiB: ${first ? (first.rss / 1024 ** 2).toFixed(1) : "n/a"}/${last ? (last.rss / 1024 ** 2).toFixed(1) : "n/a"}; heap MiB ${first ? (first.heapUsed / 1024 ** 2).toFixed(1) : "n/a"}/${last ? (last.heapUsed / 1024 ** 2).toFixed(1) : "n/a"}; peak RSS MiB ${(run.final.peakRss / 1024 ** 2).toFixed(1)}.`,
       `  Sampled heap slope bytes/s: ${run.final.heapSlopeBytesPerSecond?.toFixed(0) ?? "unavailable"}; settled checkpoints ${run.settledSamples.length}; post-stop resources: \`${JSON.stringify(run.postStop)}\`.`);
+  }
+  if (report.memory?.length) {
+    lines.push("", "## Memory isolation", "", "| Scenario | Actual load s | Attempts / complete / failed / cancelled | Peak RSS / heap / external / buffers MiB | Classification |", "|---|---:|---|---|---|");
+    for (const run of report.memory) {
+      const resource = run.resources;
+      lines.push(`| ${run.scenario} | ${(run.actualLoadMs / 1000).toFixed(2)} | ${run.attempted}/${run.completed}/${run.failed}/${run.cancelled} | ${[resource.peakRss, resource.peakHeapUsed, resource.peakExternal, resource.peakArrayBuffers].map((value) => (value / 1048576).toFixed(2)).join(" / ")} | ${run.trend.classification} |`);
+    }
+    for (const run of report.memory) {
+      lines.push("", `### ${run.scenario} checkpoints`, "", `Trend: ${JSON.stringify(run.trend)}`, "", "| Checkpoint | Seconds | RSS MiB | Heap used / total MiB | External MiB | ArrayBuffers MiB | RSS - heap total MiB | Busy / idle / queued |", "|---|---:|---:|---|---:|---:|---:|---|");
+      for (const point of run.checkpoints.filter((point) => !point.label.startsWith("settled"))) {
+        const sample = point.sample, mib = (value: number) => (value / 1048576).toFixed(2);
+        lines.push(`| ${point.label} | ${(point.elapsedMs / 1000).toFixed(2)} | ${mib(sample.rss)} | ${mib(sample.heapUsed)} / ${mib(sample.heapTotal)} | ${mib(sample.external)} | ${mib(sample.arrayBuffers)} | ${mib(point.rssMinusHeapTotal)} | ${sample.upstreamBusySockets}/${sample.upstreamIdleSockets}/${sample.agentPendingRequests} |`);
+      }
+    }
+  }
+  if (report.capacity?.length) {
+    lines.push("", "## Controlled-arrival capacity", "", "Percentiles include all attempted outcomes; schedule latency includes dispatch delay. Missed slots have no invented latency. SLO uses schedule-relative p95/p99.", "",
+      "| Profile / mode / run | Offered/s | Attempts/s | Completed/s | Failed/s | Missed schedule / cap | Peak C | Service p50/p95/p99 ms | Schedule p50/p95/p99 ms | Dispatch p99 ms | 5xx / upstream timeouts | Decision |", "|---|---:|---:|---:|---:|---|---:|---|---|---:|---|---|");
+    for (const run of report.capacity) {
+      const result = run.result;
+      lines.push(`| ${run.profile}/${run.mode}/${run.repetition} | ${run.offeredRate} | ${result.attemptedPerSecond.toFixed(1)} | ${result.requestsPerSecond.toFixed(1)} | ${(result.failed / (result.elapsedMs / 1000)).toFixed(1)} | ${result.missedScheduling}/${result.missedConcurrency} | ${result.peakConcurrency} | ${[result.latencyMs.p50, result.latencyMs.p95, result.latencyMs.p99].map((value) => value.toFixed(3)).join("/")} | ${[result.scheduleLatencyMs.p50, result.scheduleLatencyMs.p95, result.scheduleLatencyMs.p99].map((value) => value.toFixed(3)).join("/")} | ${result.schedulingDelayMs.p99.toFixed(3)} | ${run.http5xx}/${run.upstreamTimeouts ?? "n/a"} | ${run.decision.classification}: ${run.decision.reasons.join("; ")} |`);
+    }
+    lines.push("", "### Passing tested rates and dispersion", "", "| Profile / mode | Highest tested passing rate | Run rate: min / median / max completed/s |", "|---|---:|---|");
+    for (const key of new Set(report.capacity.map((run) => `${run.profile}/${run.mode}`))) {
+      const runs = report.capacity.filter((run) => `${run.profile}/${run.mode}` === key);
+      lines.push(`| ${key} | ${highestPassing(runs, Number(report.configuration.repetitions ?? 1)) ?? "none"} | See per-rate rows below |`);
+      for (const rate of new Set(runs.map((run) => run.offeredRate))) {
+        const rates = runs.filter((run) => run.offeredRate === rate).map((run) => run.result.requestsPerSecond);
+        lines.push(`| ${key} offered ${rate} | — | ${Math.min(...rates).toFixed(1)} / ${median(rates).toFixed(1)} / ${Math.max(...rates).toFixed(1)} |`);
+      }
+    }
+    lines.push("", "| Profile / mode / offered / run | Client CPU / ELU | Proxy CPU / ELU | Backend CPU / ELU | Proxy RSS / heap peak MiB |", "|---|---|---|---|---|");
+    for (const run of report.capacity) {
+      const format = (resource: typeof run.resources.proxy) => resource ? `${resource.cpuPercentOfOneCore.toFixed(1)}% / ${resource.eventLoopUtilization.toFixed(3)}` : "n/a";
+      lines.push(`| ${run.profile}/${run.mode}/${run.offeredRate}/${run.repetition} | ${format(run.resources.client)} | ${format(run.resources.proxy)} | ${format(run.resources.backends[0])} | ${run.resources.proxy ? `${(run.resources.proxy.peakRss / 1048576).toFixed(1)} / ${(run.resources.proxy.peakHeapUsed / 1048576).toFixed(1)}` : "n/a"} |`);
+    }
   }
   lines.push("", "## Reliability findings and limitations", "", ...report.limitations.map((limitation) => `- ${limitation}`), "",
     "## Assessment", "", report.passed ? "The executed configurations met their correctness checks. These bounded local runs do not establish universal throughput, statistical significance, production readiness, or absence of long-term leaks." : "At least one correctness check failed. Inspect JSON and fault details; this run is not an accepted baseline.", "");

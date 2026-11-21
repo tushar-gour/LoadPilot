@@ -6,7 +6,7 @@ import type { BackendStats, LoadOptions, LoadResult, ResourceState, WorkerInfo }
 export interface EnvironmentOptions {
   count?: number; metrics?: boolean; health?: boolean; timeoutMs?: number;
   routes?: { route: string; indices: number[] }[]; sampleMs?: number; gc?: boolean;
-  direct?: boolean;
+  direct?: boolean; upstreamKeepAlive?: boolean;
 }
 
 export class Environment {
@@ -25,7 +25,7 @@ export class Environment {
       const routes = options.routes ?? [{ route: "/", indices: environment.backends.map((_, index) => index) }];
       if (!options.direct) {
         environment.proxy = await Worker.start({ role: "proxy", metrics: options.metrics ?? true, health: options.health,
-          upstreamTimeoutMs: options.timeoutMs, sampleMs: options.sampleMs,
+          upstreamTimeoutMs: options.timeoutMs, sampleMs: options.sampleMs, upstreamKeepAlive: options.upstreamKeepAlive,
           pools: routes.map((route) => ({ route: route.route, urls: route.indices.map((index) => environment.backends[index].info.url ?? "") })) }, options.gc);
         environment.workers.push(environment.proxy);
       }
@@ -58,7 +58,8 @@ export class Environment {
     const previous = this.backends[index];
     await previous.terminate();
     const worker = await Worker.start({ role: "backend", id: `backend-${index}`, port: previous.info.port, sampleMs: this.options.sampleMs }, this.options.gc);
-    this.backends[index] = worker; this.workers.push(worker);
+    this.backends[index] = worker;
+    this.workers.splice(this.workers.indexOf(previous), 1, worker);
   }
   async close(): Promise<void> { await closeWorkers(this.workers); }
 }

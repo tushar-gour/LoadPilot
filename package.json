@@ -10,14 +10,18 @@
   "scripts": {
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc",
-    "test": "tsx --test tests/test.ts tests/proxy.test.ts tests/health.test.ts tests/metrics.test.ts tests/reliability.test.ts",
+    "test": "tsx --test tests/test.ts tests/proxy.test.ts tests/health.test.ts tests/metrics.test.ts tests/reliability.test.ts tests/memory-reliability.test.ts",
     "typecheck": "tsc -p tsconfig.bench.json",
     "prepack": "npm run build",
     "bench": "tsx benchmarks/run.ts bench",
     "bench:full": "tsx benchmarks/run.ts bench --full",
     "bench:stream": "tsx benchmarks/run.ts stream",
     "fault": "tsx benchmarks/run.ts fault",
-    "soak": "tsx benchmarks/run.ts soak"
+    "soak": "tsx benchmarks/run.ts soak",
+    "bench:memory": "tsx benchmarks/investigate.ts memory",
+    "bench:capacity": "tsx benchmarks/investigate.ts capacity",
+    "bench:soak": "tsx benchmarks/investigate.ts soak",
+    "check:package": "tsc --ignoreConfig --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --types node tests/package-consumer.mts && tsx tests/package-consumer.mts"
   },
   "keywords": ["load-balancer", "reverse-proxy", "http", "round-robin"],
   "license": "ISC",

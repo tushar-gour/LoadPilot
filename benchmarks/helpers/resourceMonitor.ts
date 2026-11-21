@@ -1,9 +1,21 @@
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
+import { getHeapStatistics, getHeapSpaceStatistics, getHeapCodeStatistics } from "node:v8";
 import type { Resources, ResourceSample, ResourceState } from "../types.js";
 
 export const unavailableState = (): ResourceState => ({ activeRequests: null, activeUpstreamExchanges: null,
   incomingSockets: null, upstreamBusySockets: null, upstreamIdleSockets: null,
-  bufferedRequestBytes: null, bufferedResponseBytes: null });
+  bufferedRequestBytes: null, bufferedResponseBytes: null, agentPendingRequests: null, acceptedConnections: null, upstreamConnectionsCreated: null });
+
+/** Checkpoint only: these V8 categories do not account for all native memory. */
+export function heapDiagnostics() {
+  const heap = getHeapStatistics();
+  const code = getHeapCodeStatistics();
+  return { used: heap.used_heap_size, total: heap.total_heap_size, limit: heap.heap_size_limit,
+    available: heap.total_available_size, external: heap.external_memory, malloced: heap.malloced_memory,
+    peakMalloced: heap.peak_malloced_memory, codeAndMetadata: code.code_and_metadata_size, bytecodeAndMetadata: code.bytecode_and_metadata_size,
+    spaces: getHeapSpaceStatistics().map((space) => ({ name: space.space_name,
+      used: space.space_used_size, size: space.space_size, physical: space.physical_space_size })) };
+}
 
 /** Bounded, decimated sample history. Maxima include samples lost to decimation. */
 export class ResourceMonitor {
@@ -16,6 +28,8 @@ export class ResourceMonitor {
   private taken = 0;
   private peakRss = 0;
   private peakHeap = 0;
+  private peakExternal = 0;
+  private peakArrayBuffers = 0;
   private peakRead = 0;
   private peakWrite = 0;
 
@@ -27,12 +41,14 @@ export class ResourceMonitor {
   reset(): void {
     this.started = performance.now(); this.cpu = process.cpuUsage(); this.elu = performance.eventLoopUtilization();
     this.samples = []; this.taken = 0; this.peakRss = 0; this.peakHeap = 0; this.peakRead = 0; this.peakWrite = 0;
+    this.peakExternal = 0; this.peakArrayBuffers = 0;
     this.lag.reset(); this.take();
   }
   private take(): void {
     const memory = process.memoryUsage();
     const sample = { elapsedMs: performance.now() - this.started, ...memory, ...this.state() };
     this.peakRss = Math.max(this.peakRss, sample.rss); this.peakHeap = Math.max(this.peakHeap, sample.heapUsed);
+    this.peakExternal = Math.max(this.peakExternal, sample.external); this.peakArrayBuffers = Math.max(this.peakArrayBuffers, sample.arrayBuffers);
     this.peakRead = Math.max(this.peakRead, sample.bufferedRequestBytes ?? 0);
     this.peakWrite = Math.max(this.peakWrite, sample.bufferedResponseBytes ?? 0);
     if (this.samples.length >= 600) this.samples = this.samples.filter((_, index) => index % 2 === 0);
@@ -53,6 +69,7 @@ export class ResourceMonitor {
     const hasLag = this.lag.count > 0;
     return { samples: [...this.samples], samplesTaken: this.taken, sampleIntervalMs: this.intervalMs,
       peakRss: this.peakRss, peakHeapUsed: this.peakHeap, peakBufferedRequestBytes: this.peakRead, peakBufferedResponseBytes: this.peakWrite,
+      peakExternal: this.peakExternal, peakArrayBuffers: this.peakArrayBuffers,
       cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000,
       cpuPercentOfOneCore: elapsed ? (cpu.user + cpu.system) / (elapsed * 10) : 0,
       eventLoopUtilization: performance.eventLoopUtilization(this.elu).utilization,

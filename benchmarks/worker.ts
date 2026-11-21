@@ -2,7 +2,10 @@ import { Agent, Server as HttpServer, type IncomingMessage, type ServerResponse 
 import type { Socket } from "node:net";
 import { LoadPilot, ServerPool, Server } from "../src/index.js";
 import { BackendFixture } from "./fixtures/backend.js";
-import { ResourceMonitor, unavailableState } from "./helpers/resourceMonitor.js";
+import { ResourceMonitor, unavailableState, heapDiagnostics } from "./helpers/resourceMonitor.js";
+import { writeHeapSnapshot } from "node:v8";
+import { mkdirSync } from "node:fs";
+import { resolve } from "node:path";
 import { localTarget, runLoad } from "./helpers/loadGenerator.js";
 import type { LoadOptions, ResourceState, WorkerConfig, WorkerInfo } from "./types.js";
 
@@ -10,6 +13,7 @@ const config: WorkerConfig = JSON.parse(process.argv[2] ?? "{}");
 if (!["backend", "proxy", "client"].includes(config.role)) throw new Error("Invalid worker role");
 const sockets = new Set<Socket>();
 const exchanges = new Set<{ req: IncomingMessage; res: ServerResponse }>();
+let acceptedConnections = 0, upstreamConnectionsCreated = 0, snapshots = 0;
 const fixture = config.role === "backend" ? new BackendFixture(config.id ?? "backend-0") : undefined;
 const pools = (config.pools ?? []).map((entry) => new ServerPool({ route: entry.route,
   servers: entry.urls.map((url) => { localTarget(url); return new Server(url); }),
@@ -31,7 +35,15 @@ if (pilot) {
     if (typeof args[0] !== "number") throw new Error("Unexpected listener invocation");
     listen({ port: args[0], host: "127.0.0.1" }); return this;
   };
-  listener.on("connection", (socket) => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
+  listener.on("connection", (socket) => { acceptedConnections++; sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
+  for (const name of ["httpAgent", "httpsAgent"]) {
+    const agent = property(property(pilot, "proxy"), name);
+    if (!(agent instanceof Agent)) throw new Error("Benchmark agent adapter needs updating");
+    const create = agent.createConnection.bind(agent);
+    agent.createConnection = function (...args) { upstreamConnectionsCreated++; return create(...args); };
+    // Diagnostic-only control; production continues to use its configured Agent.
+    if (config.upstreamKeepAlive !== undefined) Reflect.set(agent, "keepAlive", config.upstreamKeepAlive);
+  }
   listener.on("request", (req, res) => {
     const exchange = { req, res }; exchanges.add(exchange);
     const done = () => exchanges.delete(exchange);
@@ -45,16 +57,18 @@ function state(): ResourceState {
   if (!pilot) return unavailableState();
   const proxy = property(pilot, "proxy"), active = property(proxy, "active");
   const agents = [property(proxy, "httpAgent"), property(proxy, "httpsAgent")];
-  let busy = 0, idle = 0;
+  let busy = 0, idle = 0, pending = 0;
   for (const agent of agents) {
     if (!(agent instanceof Agent)) throw new Error("Benchmark agent adapter needs updating");
     busy += Object.values(agent.sockets).reduce((sum, list) => sum + (list?.filter((socket) => !socket.destroyed).length ?? 0), 0);
     idle += Object.values(agent.freeSockets).reduce((sum, list) => sum + (list?.filter((socket) => !socket.destroyed).length ?? 0), 0);
+    pending += Object.values(agent.requests).reduce((sum, list) => sum + (list?.length ?? 0), 0);
   }
   const current = Array.from(exchanges).filter(({ res }) => !res.destroyed && !res.writableFinished);
   return { activeRequests: current.length, activeUpstreamExchanges: active instanceof Set ? active.size : null,
     incomingSockets: Array.from(sockets).filter((socket) => !socket.destroyed).length,
     upstreamBusySockets: busy, upstreamIdleSockets: idle,
+    agentPendingRequests: pending, acceptedConnections, upstreamConnectionsCreated,
     bufferedRequestBytes: current.reduce((sum, item) => sum + item.req.readableLength, 0),
     bufferedResponseBytes: current.reduce((sum, item) => sum + item.res.writableLength, 0) };
 }
@@ -85,6 +99,23 @@ process.on("message", (message: unknown) => {
       case "resources": return monitor.snapshot();
       case "resetResources": monitor.reset(); return true;
       case "state": return state();
+      case "diagnostics": {
+        const resources = monitor.snapshot(), sample = resources.samples.at(-1)!;
+        const listener = property(pilot, "httpServer"), collector = property(pilot, "metricsCollector");
+        const active = property(collector, "active"), metrics = pilot?.getMetrics();
+        return { sample, heap: heapDiagnostics(), rssMinusHeapTotal: sample.rss - sample.heapTotal,
+          healthStates: metrics?.pools.flatMap((pool) => pool.backends.map((backend) => backend.health?.state ?? "UNKNOWN")) ?? [],
+          resources: resources.activeResourceTypes,
+          listeners: listener instanceof HttpServer ? Object.fromEntries(listener.eventNames().map((name) => [String(name), listener.listenerCount(name)])) : {},
+          metricScopes: metrics ? { active: active instanceof Set ? active.size : -1,
+            retiredActive: metrics.pools.flatMap((pool) => pool.backends).filter((backend) => !backend.registered).length,
+            currentBackends: metrics.pools.reduce((sum, pool) => sum + pool.eligibility.registered, 0) } : null };
+      }
+      case "heapSnapshot": {
+        if (config.role !== "proxy" || snapshots >= 2) throw new Error("At most two proxy-only snapshots per worker");
+        const directory = resolve("benchmarks/results/heaps"); mkdirSync(directory, { recursive: true });
+        return writeHeapSnapshot(resolve(directory, `synthetic-${process.pid}-${snapshots++}.heapsnapshot`));
+      }
       case "metrics": return pilot?.getMetrics();
       case "stats": return fixture?.stats();
       case "resetStats": fixture?.reset(); return true;
@@ -101,7 +132,7 @@ process.on("message", (message: unknown) => {
       }
       case "add": {
         if (typeof payload !== "string") throw new Error("Expected local backend URL");
-        const url = new URL(payload); if (url.hostname !== "127.0.0.1") throw new Error("Nonlocal backend");
+        localTarget(payload);
         pools[0]?.add(new Server(payload)); return true;
       }
       case "gc": if (typeof global.gc === "function") { global.gc(); return true; } return false;

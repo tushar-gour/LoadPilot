@@ -4,9 +4,9 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { createHash } from "node:crypto";
 import { Environment, accounting } from "./helpers/environment.js";
 import { environmentInfo, writeReport } from "./helpers/report.js";
-import { hashBytes, jsonPayload, smallPayload } from "./helpers/statistics.js";
+import { Histogram, hashBytes, jsonPayload, smallPayload } from "./helpers/statistics.js";
 import { faultNames, runFault } from "./scenarios/faults.js";
-import type { BackendStats, BenchmarkReport, BenchmarkRow, LoadOptions, Resources, ResourceState, ResourceSample } from "./types.js";
+import type { BackendStats, BenchmarkReport, BenchmarkRow, LoadOptions, Resources, ResourceState, ResourceSample, DiagnosticCheckpoint } from "./types.js";
 
 const { values, positionals } = parseArgs({ allowPositionals: true, options: {
   full: { type: "boolean", default: false }, concurrency: { type: "string" }, duration: { type: "string" },
@@ -15,6 +15,7 @@ const { values, positionals } = parseArgs({ allowPositionals: true, options: {
   "sample-ms": { type: "string" }, "keep-alive": { type: "string", default: "true" }, gc: { type: "boolean", default: false },
   scenario: { type: "string" }, "payload-mib": { type: "string" },
   label: { type: "string" },
+  diagnostics: { type: "boolean", default: false }, idle: { type: "string" },
 } });
 const command = positionals[0] ?? "bench";
 if (!["bench", "stream", "fault", "soak"].includes(command) || positionals.length > 1) throw new Error("Use bench, stream, fault or soak");
@@ -32,6 +33,8 @@ const concurrencies = (values.concurrency ?? (values.full ? "1,10,50" : "1,10"))
 if (concurrencies.length > 10) throw new Error("At most 10 concurrency levels");
 const sampleMs = number(values["sample-ms"], 200, 50, 30000);
 const timeoutMs = number(values["timeout-ms"], 5000, 1, 120000);
+const idleMs = Math.round(number(values.idle, 0, 0, 300, false) * 1000);
+if ((values.diagnostics || idleMs) && command !== "soak") throw new Error("Diagnostics and idle recovery apply only to soak");
 if (!["true", "false"].includes(values["keep-alive"] ?? "")) throw new Error("keep-alive must be true or false");
 const requestLimit = values.requests === undefined ? undefined : number(values.requests, 1, 1, 10_000_000);
 const rate = values.rate === undefined ? undefined : number(values.rate, 1, 1, 100_000);
@@ -133,8 +136,16 @@ async function soak(): Promise<void> {
       await environment.quiet();
       await sleep(200); await environment.proxy.call("gc"); await environment.proxy.call("resetResources");
       const initial = await environment.proxy.call<Resources>("resources");
+      const diagnostics: DiagnosticCheckpoint[] = [];
+      const diagnosticStarted = performance.now();
+      const checkpoint = async (label: string) => {
+        if (!values.diagnostics) return;
+        diagnostics.push({ ...await environment.proxy.call<Omit<DiagnosticCheckpoint, "label" | "elapsedMs">>("diagnostics"), label, elapsedMs: performance.now() - diagnosticStarted });
+      };
+      await checkpoint("baseline");
       const started = performance.now(), workloads = new Set<string>(), settledSamples: ResourceSample[] = [];
-      let cycles = 0;
+      let cycles = 0, attempted = 0, completed = 0, failed = 0, cancelled = 0;
+      const latencies = new Histogram();
       while (performance.now() - started < durationMs) {
         const phase = cycles % 6;
         const paths = ["/get", "/post", "/reset", "/download?bytes=1048576", "/download?bytes=1048576", "/get"];
@@ -151,6 +162,7 @@ async function soak(): Promise<void> {
           expectedStatus: phase === 2 ? 502 : phase === 5 ? 503 : 200,
           expectedHash: phase === 4 ? hashBytes(1048576) : undefined });
         assert.equal(result.failed, 0, JSON.stringify(result.errors));
+        attempted += result.attempted; completed += result.completed; failed += result.failed; cancelled += result.cancelled; latencies.merge(result.latencyMs);
         if (phase === 5) { await environment.backends[0].call("health", { status: 200 }); await environment.healthy(); }
         await environment.quiet();
         if (cycles % 7 === 6) { await environment.restartProxy(); await environment.healthy(); workloads.add("restart"); }
@@ -166,12 +178,17 @@ async function soak(): Promise<void> {
         cycles++;
       }
       const final = await environment.proxy.call<Resources>("resources");
+      const actualDurationMs = performance.now() - started;
+      await checkpoint("load-end");
+      if (idleMs) { await sleep(idleMs); await checkpoint("idle-end"); if (values.gc) { await environment.proxy.call("gc"); await checkpoint("idle-GC"); await sleep(1000); await checkpoint("post-GC-idle"); } }
       const postStop = await environment.proxy.call<ResourceState>("stop");
+      await checkpoint("stopped");
       const settled = postStop.activeRequests === 0 && postStop.activeUpstreamExchanges === 0 && postStop.upstreamBusySockets === 0 && postStop.upstreamIdleSockets === 0 && postStop.incomingSockets === 0;
       assert.ok(settled);
-      report.soak.push({ mode: metrics ? "metrics" : "proxy", cycles, actualDurationMs: performance.now() - started,
-        initial, final, settled, workloads: [...workloads], postStop, settledSamples });
-      console.log(`soak ${metrics ? "metrics" : "disabled"}: ${cycles} batches, ${((performance.now() - started) / 1000).toFixed(2)}s; active/sockets zero`);
+      report.soak.push({ mode: metrics ? "metrics" : "proxy", cycles, actualDurationMs,
+        initial, final, settled, workloads: [...workloads], postStop, settledSamples, diagnostics,
+        requests: { attempted, completed, failed, cancelled, latencyMs: latencies.snapshot() } });
+      console.log(`soak ${metrics ? "metrics" : "disabled"}: ${cycles} batches, ${(actualDurationMs / 1000).toFixed(2)}s load; active/sockets zero`);
     } finally { await environment.close(); activeEnvironment = undefined; }
   }
 }

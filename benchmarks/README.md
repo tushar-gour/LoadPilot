@@ -82,3 +82,55 @@ Each command writes `benchmarks/results/<command>.json` and `.md`, plus `latest.
 Generated results and temporary artifacts under `results` are ignored by Git; only `.gitkeep` is tracked there. They are local and not available through GitHub. Commit the concise, sanitized, manually reviewed findings in [BASELINE.md](BASELINE.md). Do not copy raw environment dumps, private machine names, real request data, secrets, or large repetitive reports into Git.
 
 Reports produced before the milestone commit name the parent LoadPilot source SHA and indicate a dirty tooling tree. `BASELINE.md` identifies that provenance and the exact commands. Repeat runs on another OS/hardware/runtime before drawing portability or production-capacity conclusions. HTTPS correctness remains covered by the normal suite; TLS throughput, remote deployments, multi-hour soaks, packet-level diagnostics and OS descriptor census are not established by this HTTP-only local harness.
+
+## Memory forensics and capacity (Milestone 5)
+
+```sh
+npm run bench:memory
+npm run bench:memory -- --scenarios get,metrics,health-idle,health-get --duration 10 --gc
+npm run bench:memory -- --mode investigation --scenarios download-8,mixed --duration 120 --warmup 2 --idle 10 --gc
+npm run bench:memory -- --scenarios download-32 --duration 120 --gc --gc-policy end --label idle-recovery
+npm run bench:soak -- --mode investigation --duration 120 --idle 10 --gc
+npm run bench:soak -- --mode extended --duration 600 --idle 30 --gc
+npm run soak -- --duration 60 --concurrency 10 --sample-ms 100 --gc --diagnostics --idle 10 --label legacy-memory
+npm run bench:capacity -- --rates 100,1000,3000 --profiles get,json --duration 3 --warmup 0.5 --repetitions 2 --concurrency 100
+npm run bench:capacity -- --rates 100,500 --p95-ms 50 --p99-ms 100 --error-rate 0.001 --arrival-tolerance 0.02 --completion-tolerance 0.02
+npm run build
+npm run check:package
+```
+
+`investigate.ts` orchestrates these new commands using the same `Environment`, workers, native generator, sampler and report writer as Milestone 4. Existing commands remain available. The new default is a three-second **smoke** window per selected scenario/stage; `--mode investigation` defaults to 120 seconds and `--mode extended` to 600 seconds. These are per scenario (memory) or per mode/rate/repetition (capacity), not total command runtime. Explicit `--duration` overrides the mode. Long runs are never part of `npm test` or ordinary CI.
+
+Memory scenarios: `idle,get,metrics,health-idle,health-get,download-1,download-8,download-32,upload-1,upload-8,upload-32,cancel,failures,keepalive-off,churn,churn-metrics,restart,mixed`. Defaults are idle/get/metrics/download-8; `bench:soak` selects mixed. Every scenario starts fresh processes. The default batch is 20 requests, concurrency 20, followed by 100 ms settling; stream batches cap at two requests/concurrency two. `--batch-requests` (1–1000) and `--concurrency` (1–500) control intensity. Unlike a continuous capacity run, memory runs deliberately pause to inspect settled state. They cannot establish peak throughput. Compare actual counts and duration as well as configuration.
+
+Metrics is enabled for `metrics`, `churn-metrics` and `mixed`; health for `health-idle`, `health-get` and `mixed`. Probe settings remain the diagnostic fixture's 50 ms interval, 100 ms deadline and thresholds two, not the production defaults. Failure scenarios explicitly cycle refusal, reset, timeout, truncation and backend process replacement. With health enabled, a refused batch can transition from 502 to confirmed-unavailable 503; both are validated, with no replay. Mixed also cycles health transitions and registration/restart activity.
+
+`keepalive-off` disables client reuse and, through the guarded harness-only Agent adapter, upstream keep-alive. This isolates connection churn; it does not introduce a public production configuration or recommend disabling reuse. Network checkpoints record actual lifetime accepted/upstream-created connections, busy/idle Agent sockets and queued Agent requests. Counts include warmup, so compare against baseline checkpoints. Listener counts, active metric scopes and retired metric rows are checked after settling. Exited replacement workers are released by the controller rather than accumulated in its worker list.
+
+### Checkpoints and memory interpretation
+
+Memory commands record startup-after-readiness, warmup-end, baseline, settled batches, load-end, idle midpoint/end, optional immediate post-GC and one-second post-GC-idle, then stopped state. `--idle` defaults to two seconds and is bounded to 0–300 seconds. A final batch or timeout may extend the requested load duration; JSON records actual load and total runtime separately. Warmup/readiness, settling and idle are not counted as the configured load window.
+
+`--gc` exposes GC only in synthetic fixtures. With default `--gc-policy checkpoint`, GC runs at baseline, after each settled batch, and after idle. `--gc-policy end` instead limits explicit GC to baseline and after idle, allowing natural collection during load. These policies perturb memory/CPU and must be labeled when comparing runs. Neither is normal LoadPilot behavior. Histograms aggregate bounded per-batch distributions; deliberate partial responses are failed client outcomes, while expected 502/503/504 are successful validations of failed proxy exchanges.
+
+RSS, heap used/total, external and ArrayBuffer memory stay separate. External **includes** ArrayBuffers; they must not be added as independent totals. `rssMinusHeapTotal` is a descriptive difference, not exclusively native memory. Checkpoints use supported [V8 APIs](https://nodejs.org/docs/latest-v22.x/api/v8.html) for heap limits/availability, spaces and code/metadata. V8 `malloced_memory` is not a whole-process native-allocation census. Space capacity and live objects have different meanings. Full sampler histories include warmup/allocation peaks; reported memory trends use baseline plus settled (post-GC when configured) checkpoints, and separately the latter half. All timestamps are actual monotonic observations. Raw samples allow full-window analysis without equating these different populations.
+
+Trend classifications are **heuristics**, not automatic leak findings. Fewer than six checkpoints or 30 seconds is inconclusive. Late heap slope above 64 KiB/s or external/RSS above 128 KiB/s flags suspicious growth. A >8 MiB RSS rise with late RSS slope <16 KiB/s and heap/external growth <2 MiB suggests warmup/retention; net RSS change <8 MiB with heap/external growth <2 MiB records no concerning growth. Other patterns remain inconclusive. Whole-run slopes can hide plateaus; inspect late trends, heap spaces, repeated checkpoints and post-idle recovery. Ordinary tests assert resource invariants, not exact RSS or GC timing.
+
+Optional snapshots: `npm run bench:memory -- --scenarios get --duration 3 --snapshots`. Exactly one scenario is required, with at most two snapshots (baseline and after idle) in `results/heaps/`. Snapshots block the fixture and can consume substantial time, memory and disk; they distort timing and do not explain all native memory. Only fixture processes may generate them; no request hook can trigger snapshots. Workers inherit essential runtime environment keys rather than application/repository credentials. Snapshots may still contain runtime file paths; keep them local and inspect before sharing. They are ignored by Git. Do not claim snapshot analysis unless actually performed.
+
+### Controlled-arrival semantics and SLOs
+
+Capacity compares direct, proxy, metrics, and metrics-plus-health on small GET and synthetic JSON. Each stage has fresh processes, identical body validation, configurable warmup and rotated mode order. Limits: ten distinct rates (1–100,000/s), 1–5 repetitions, at most 300 phases; duration 0.1 seconds–24 hours, sample interval 50–30,000 ms. Choose high values explicitly. No external target flag exists.
+
+The scheduler now dispatches a bounded group of due arrivals after a delayed wakeup, up to free concurrency. It never builds an arrival queue. Excess old slots are explicitly classified as scheduling-bound catch-up misses or concurrency-cap misses. Each attempted request retains its scheduled arrival time. `latencyMs` measures dispatch to complete body/failure; `scheduleLatencyMs` includes dispatch delay; `headersLatencyMs` measures dispatch to observed headers. All attempted outcomes appear in completion distributions, including failures/timeouts/cancellations. Skipped slots have no invented response latency and are evaluated separately, avoiding a misleading success-only latency population. This is a bounded open-arrival approximation, not an unlimited rate guarantee.
+
+SLO defaults are schedule-relative p95 ≤50 ms, p99 ≤100 ms, error fraction ≤0.001, missed arrivals ≤0.02, and both completion count/offered slots and achieved completion rate (including drain) within 0.02 of offered traffic. Fractions use 0–1, not percentages. These are synthetic-test targets, not universal product SLOs. Empty/partial/inconsistent populations cannot pass. The highest **tested passing rate** requires all planned repetitions for that profile/mode to pass; no interpolation or maximum-sustainable-capacity claim is made. A raw `clientLimited` flag records any missed slot; SLO classification tolerates misses only up to the explicitly configured threshold. A failed SLO is an experimental finding; only harness correctness/cleanup failure exits nonzero.
+
+Reports show offered/attempted/completed/failed rates, scheduling misses/delay, peak outstanding concurrency, service/schedule percentiles, 5xx, enabled upstream timeout counters, all three processes' CPU/ELU/memory, and per-rate dispersion. CPU/ELU and miss categories suggest plausible bottlenecks, not exclusive causal attribution. `executionStatus` distinguishes running/completed/failed/interrupted reports, and results are checkpointed after each completed scenario/stage. A killed run may retain a running/partial report, never an implicit complete result.
+
+### Runtime/platform verification
+
+`npm run check:package` compiles a consumer against built package declarations and exercises built HTTP/HTTPS forwarding, health, metrics and restart using the existing public TLS test fixture. GitHub Actions runs Node 22.19.0 and 24.x on Windows/Ubuntu/macOS, with full tests, build/package checks and tiny harness smoke commands. There are no timing-based throughput assertions or long CI soaks. Documentation-only pushes do not rerun this matrix. A workflow definition is not proof of a passed job: consult the actual run linked from [MEMORY_AND_CAPACITY.md](MEMORY_AND_CAPACITY.md).
+
+New raw artifacts default to `memory-isolation.*`, `capacity.*` and `extended-soak.*`; labels can separate repetitions. They remain local/ignored. The committed [MEMORY_AND_CAPACITY.md](MEMORY_AND_CAPACITY.md) records actual executed findings, failed/partial attempts and unexecuted longer validation.

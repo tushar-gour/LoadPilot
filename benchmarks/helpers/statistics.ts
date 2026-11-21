@@ -32,6 +32,12 @@ export class Histogram {
       min: this.count ? this.min : 0, max: this.max,
       p50: percentile(0.5), p95: percentile(0.95), p99: percentile(0.99), buckets: [...this.bins] };
   }
+  merge(value: Distribution): void {
+    if (value.buckets.length !== this.bins.length || value.count !== value.buckets.reduce((sum, count) => sum + count, 0)) throw new Error("Incompatible histogram");
+    for (let index = 0; index < this.bins.length; index++) this.bins[index] += value.buckets[index];
+    this.count += value.count; this.sum += value.average * value.count;
+    if (value.count) { this.min = Math.min(this.min, value.min); this.max = Math.max(this.max, value.max); }
+  }
 }
 
 export const jsonPayload = Buffer.from(JSON.stringify({ operation: "synthetic", values: Array.from({ length: 12 }, (_, id) => ({ id, value: "loadpilot" })) }));

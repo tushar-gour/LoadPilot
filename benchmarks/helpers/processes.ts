@@ -18,9 +18,12 @@ export class Worker {
   private readonly killOnExit: () => void;
 
   private constructor(config: WorkerConfig, gc: boolean) {
+    // Synthetic workers do not need repository credentials or application env.
+    const environment: NodeJS.ProcessEnv = {};
+    for (const key of ["PATH", "SystemRoot", "WINDIR", "TEMP", "TMP"]) if (process.env[key] !== undefined) environment[key] = process.env[key];
     this.child = fork(fileURLToPath(new URL("../worker.ts", import.meta.url)), [JSON.stringify(config)], {
       execArgv: ["--import", "tsx", "--unhandled-rejections=strict", ...(gc ? ["--expose-gc"] : [])],
-      stdio: ["ignore", "ignore", "pipe", "ipc"], windowsHide: true,
+      stdio: ["ignore", "ignore", "pipe", "ipc"], windowsHide: true, env: environment,
     });
     this.killOnExit = () => this.child.kill();
     process.once("exit", this.killOnExit);
@@ -65,9 +68,12 @@ export class Worker {
 
   async terminate(): Promise<void> {
     if (this.child.exitCode !== null || this.child.signalCode !== null) return;
-    const exited = new Promise<void>((resolve) => this.child.once("exit", () => resolve()));
-    this.child.kill();
-    await exited;
+    await new Promise<void>((resolve, reject) => {
+      const exited = () => { clearTimeout(hardKill); clearTimeout(deadline); resolve(); };
+      const hardKill = setTimeout(() => this.child.kill("SIGKILL"), 1000);
+      const deadline = setTimeout(() => { this.child.off("exit", exited); reject(new Error("Fixture termination deadline")); }, 3000);
+      this.child.once("exit", exited); this.child.kill();
+    });
   }
 
   async close(): Promise<void> {

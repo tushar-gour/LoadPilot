@@ -31,16 +31,25 @@ export function validateLoad(options: LoadOptions): void {
   if (options.cancel !== undefined && !["before-response", "upload", "response"].includes(options.cancel)) throw new Error("Invalid cancellation mode");
 }
 
+/** Catch up only within the configured outstanding-request bound. */
+export function arrivalPlan(slots: number, concurrency: number, active: number) {
+  const schedulingMisses = Math.max(0, slots - concurrency);
+  const boundedSlots = Math.min(slots, concurrency);
+  const launches = Math.min(boundedSlots, concurrency - active);
+  return { launches, schedulingMisses, concurrencyMisses: boundedSlots - launches };
+}
+
 export async function runLoad(options: LoadOptions): Promise<LoadResult> {
   validateLoad(options);
   const urls = options.targets.map(localTarget);
   const agent = new Agent({ keepAlive: options.keepAlive ?? true, maxSockets: options.concurrency, maxFreeSockets: options.concurrency });
-  const latency = new Histogram(), scheduling = new Histogram();
+  const latency = new Histogram(), scheduling = new Histogram(), scheduleLatency = new Histogram(), headersLatency = new Histogram();
   const statuses: Record<string, number> = Object.create(null), errors: Record<string, number> = Object.create(null), backends: Record<string, number> = Object.create(null);
   const start = performance.now(), end = start + options.durationMs;
   let attempted = 0, completed = 0, failed = 0, timedOut = 0, cancelled = 0, active = 0;
   let received = 0, blocked = 0, scheduled = 0, missed = 0;
   let missedScheduling = 0, missedConcurrency = 0;
+  let live = 0, peakConcurrency = 0, reusedSockets = 0, newSockets = 0;
   const sizes = new WeakMap<object, number>();
   const increment = (map: Record<string, number>, key: string) => {
     if (!(key in map)) {
@@ -50,9 +59,11 @@ export async function runLoad(options: LoadOptions): Promise<LoadResult> {
     map[key] = (map[key] ?? 0) + 1;
   };
   const limit = options.requests ?? 10_000_000;
-  const one = (sequence: number): Promise<void> => new Promise((resolve) => {
+  const one = (sequence: number, scheduledAt = performance.now()): Promise<void> => new Promise((resolve) => {
     const target = urls[sequence % urls.length];
     const started = performance.now();
+    live++; peakConcurrency = Math.max(peakConcurrency, live);
+    if (options.rate) scheduling.record(started - scheduledAt);
     let settled = false, bytes = 0;
     const hash = createHash("sha256");
     const chunks: Buffer[] = [];
@@ -65,6 +76,7 @@ export async function runLoad(options: LoadOptions): Promise<LoadResult> {
       if (settled) return;
       settled = true; clearTimeout(deadline); clearTimeout(pauseTimer);
       latency.record(performance.now() - started);
+      scheduleLatency.record(performance.now() - scheduledAt); live--;
       received += bytes;
       if (kind === "complete") completed++;
       else if (kind === "cancel") cancelled++;
@@ -73,8 +85,10 @@ export async function runLoad(options: LoadOptions): Promise<LoadResult> {
       resolve();
     };
     const deadline = setTimeout(() => finish("timeout", "deadline"), options.timeoutMs ?? 5000);
+    req.once("socket", () => { if (req.reusedSocket) reusedSockets++; else newSockets++; });
     req.on("error", (error: NodeJS.ErrnoException) => finish(options.cancel && error.code === "ECONNRESET" ? "cancel" : "failure", error.code ?? "request-error"));
     req.on("response", (res) => {
+      headersLatency.record(performance.now() - started);
       increment(statuses, String(res.statusCode));
       const id = res.headers["x-backend-id"];
       if (typeof id === "string" && /^[a-z0-9-]{1,32}$/.test(id)) increment(backends, id);
@@ -134,15 +148,18 @@ export async function runLoad(options: LoadOptions): Promise<LoadResult> {
         const now = performance.now();
         const due = start + scheduled * 1000 / options.rate;
         if (now < due) { await sleep(Math.min(10, due - now)); continue; }
-        const slots = Math.min(Math.floor((now - due) * options.rate / 1000) + 1, Math.ceil((end - due) * options.rate / 1000));
+        const slots = Math.min(Math.floor((now - due) * options.rate / 1000) + 1, Math.ceil((end - due) * options.rate / 1000), limit - attempted);
         if (slots <= 0) break;
-        // Explicitly account for overdue arrivals; never queue an unbounded backlog.
-        missed += Math.max(0, slots - 1); missedScheduling += Math.max(0, slots - 1); scheduled += slots;
-        scheduling.record(now - due);
-        if (active >= options.concurrency) { missed++; missedConcurrency++; continue; }
-        active++;
-        const task = one(attempted++).finally(() => { active--; pending.delete(task); });
-        pending.add(task);
+        const plan = arrivalPlan(slots, options.concurrency, active);
+        const dropped = plan.schedulingMisses + plan.concurrencyMisses;
+        missed += dropped; missedScheduling += plan.schedulingMisses; missedConcurrency += plan.concurrencyMisses; scheduled += slots;
+        // No arrival queue: launch only available slots, discard the oldest
+        // excess slots, and retain actual schedule delay for every attempt.
+        for (let index = dropped; index < slots; index++) {
+          active++;
+          const task = one(attempted++, due + index * 1000 / options.rate).finally(() => { active--; pending.delete(task); });
+          pending.add(task);
+        }
       }
       await Promise.all(pending);
       if (attempted < limit) {
@@ -157,5 +174,6 @@ export async function runLoad(options: LoadOptions): Promise<LoadResult> {
   return { attempted, completed, failed, timedOut, cancelled, elapsedMs, issuingMs: Math.min(options.durationMs, elapsedMs),
     requestsPerSecond: completed / (elapsedMs / 1000), attemptedPerSecond: attempted / (elapsedMs / 1000), statuses, errors, backends,
     latencyMs: latency.snapshot(), schedulingDelayMs: scheduling.snapshot(), scheduled: options.rate ? scheduled : attempted,
+    scheduleLatencyMs: scheduleLatency.snapshot(), headersLatencyMs: headersLatency.snapshot(), peakConcurrency, reusedSockets, newSockets,
     missedArrivals: missed, missedScheduling, missedConcurrency, clientLimited: missed > 0, bytesReceived: received, uploadBackpressureEvents: blocked };
 }
