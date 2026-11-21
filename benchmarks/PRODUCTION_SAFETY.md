@@ -4,7 +4,7 @@ Executed on 2026-11-21, Windows 10.0.26300, Node v24.14.0, Intel i7-12700H (20 l
 
 ## Source and verification
 
-The clean baseline was `8309bab48a774af299591830a079d0f5dd8d9ab6`: 179 tests passed, zero failed/cancelled/skipped. Post-change measurements used the reviewed Milestone 6 working tree based on that commit; reports correctly record `workingTreeDirty: true`. The implementation commit is the parent of the later CI-evidence documentation commit. Raw synthetic logs/reports remain ignored in `benchmarks/results/`; this document records the reviewed results without secrets or heap snapshots.
+The clean baseline was `8309bab48a774af299591830a079d0f5dd8d9ab6`: 179 tests passed, zero failed/cancelled/skipped. Post-change measurements used the reviewed Milestone 6 working tree based on that commit; reports correctly record `workingTreeDirty: true`. The implementation commit is [`7b0ceb7fc8a4216ffbd9d856fbacc5d448fc374f`](https://github.com/tushar-gour/LoadPilot/commit/7b0ceb7fc8a4216ffbd9d856fbacc5d448fc374f), the parent of the later CI-evidence documentation commit. Raw synthetic logs/reports remain ignored in `benchmarks/results/`; this document records the reviewed results without secrets or heap snapshots.
 
 - `npm install`: up to date; zero reported vulnerabilities.
 - `npm run typecheck`: passed, including source, tests and benchmark tooling.
@@ -49,7 +49,18 @@ Explicit-GC initial/final live heap was 11.08/10.16 MiB disabled and 11.16/10.22
 
 ## Hosted CI
 
-Hosted Windows, Ubuntu and macOS jobs on Node 22.19.0 and 24.x are pending the implementation push. Results will be recorded only after all six jobs complete. The existing workflow verifies typecheck, all tests, build, built package, dry-run packing and bounded memory/capacity harness smoke.
+[GitHub Actions run 44910844986](https://github.com/tushar-gour/LoadPilot/actions/runs/44910844986) completed successfully for the implementation commit above. Actual logs show:
+
+| Hosted platform | Node | Tests passed | Failed / cancelled / skipped | Job result |
+|---|---|---:|---|---|
+| Windows Server 2025 (10.0.26100) | 22.19.0 | 282 | 0 / 0 / 0 | PASS |
+| Windows Server 2025 (10.0.26100) | 24.22.3 | 282 | 0 / 0 / 0 | PASS |
+| Ubuntu 26.04.1 | 22.19.0 | 282 | 0 / 0 / 0 | PASS |
+| Ubuntu 26.04.1 | 24.22.3 | 282 | 0 / 0 / 0 | PASS |
+| macOS 26.7.2 | 22.19.0 | 282 | 0 / 0 / 0 | PASS |
+| macOS 26.7.2 | 24.22.3 | 282 | 0 / 0 / 0 | PASS |
+
+Every job also passed clean dependency installation, typecheck, build, built ESM/declaration consumer with HTTP/HTTPS listeners and upstreams, dry-run packing, and bounded memory/capacity harness smoke. All six completed before this evidence was recorded. The follow-up changes only this Markdown report; source, tests, configuration and harness remain identical to the tested implementation commit. The existing workflow ignores Markdown-only pushes, so it does not rerun for this evidence update.
 
 ## Remaining operational limits
 
