@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.test.json",
+  "include": ["src/**/*.ts", "benchmarks/**/*.ts", "tests/**/*.ts"],
+  "exclude": ["node_modules", "dist", "benchmarks/results"]
+}

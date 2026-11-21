@@ -345,3 +345,17 @@ npm pack --dry-run --cache .npm
 `typecheck` covers source and tests. Tests use Node's test/assert libraries and real local HTTP/HTTPS backends on allocated ports. They exercise routing, verbs, headers/cookies, Round Robin, independent listeners, dynamic registration, failures, deadlines, disconnects, incremental streams and an 8 MiB upload. Health tests control probe timers with Node's test timer mocks while exercising real network streams, including thresholds, recovery, no overlap, stale-result protection, passive signals, shared ownership and process-exit cleanup. Metrics tests cover exactly-once outcomes, concurrency, local/backend status origin, cancellations, histograms, immutable snapshots, identity churn, health statistics, disabled/enabled streaming, instrumentation fault isolation, shutdown/restart retention and process exit. The localhost TLS certificate/key under `tests/fixtures` are public test-only material; regenerate them when expired. TLS tests temporarily add that certificate to their test process's trust list and restore it afterward.
 
 Source lives under `src/`; the published package contains generated JavaScript/declarations in `dist/` and this README. Internal transport and routing helpers are not package exports. For native connection semantics, see the [Node.js HTTP documentation](https://nodejs.org/api/http.html).
+
+## Performance and reliability validation
+
+Repository-only tooling now runs the client, proxy and backends in separate Node.js processes on loopback with dynamic ports. It compares direct/proxied/metrics-enabled traffic, verifies streaming hashes and concurrent selection counts, injects deterministic faults, and samples CPU, memory, event-loop behavior and actual tracked sockets. Normal tests include bounded reliability regressions, not a long benchmark or soak.
+
+```sh
+npm run bench
+npm run bench:full -- --concurrency 10 --duration 1 --repetitions 3
+npm run bench:stream
+npm run fault
+npm run soak -- --duration 12 --concurrency 10 --sample-ms 100 --gc
+```
+
+See [benchmarks/README.md](benchmarks/README.md) for configuration, limits, methodology and cleanup behavior, and [benchmarks/BASELINE.md](benchmarks/BASELINE.md) for actual reviewed measurements and limitations. Generated JSON/Markdown lives in ignored `benchmarks/results/`; it is local rather than published to GitHub. Percentiles are approximations, resource peaks are sampled, and local ratios include TCP/client/runtime overhead and measurement noise. Short successful runs do not establish production readiness or absence of long-term leaks.

@@ -10,9 +10,14 @@
   "scripts": {
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc",
-    "test": "tsx --test tests/test.ts tests/proxy.test.ts tests/health.test.ts tests/metrics.test.ts",
-    "typecheck": "tsc -p tsconfig.test.json",
-    "prepack": "npm run build"
+    "test": "tsx --test tests/test.ts tests/proxy.test.ts tests/health.test.ts tests/metrics.test.ts tests/reliability.test.ts",
+    "typecheck": "tsc -p tsconfig.bench.json",
+    "prepack": "npm run build",
+    "bench": "tsx benchmarks/run.ts bench",
+    "bench:full": "tsx benchmarks/run.ts bench --full",
+    "bench:stream": "tsx benchmarks/run.ts stream",
+    "fault": "tsx benchmarks/run.ts fault",
+    "soak": "tsx benchmarks/run.ts soak"
   },
   "keywords": ["load-balancer", "reverse-proxy", "http", "round-robin"],
   "license": "ISC",
