@@ -176,7 +176,7 @@ These require **both planned repetitions** to pass. They are not maximum sustain
 
 The first generator check was itself client-limited by a harness policy: it dispatched only one due request per wakeup and discarded the others. At offered 100/sec, direct/proxy/metrics/health completed **64.8/80.1/77.3/74.2**, missing **35/19/22/25 slots** in one second. After bounded catch-up, the identical check completed **98.6/99.0/98.9/98.7**, missing **1/0/0/0**. No production optimization was involved. The scheduler retains each attempted request's real scheduled time and never queues more than the concurrency bound.
 
-At offered 5000/sec all modes reached peak client concurrency **100**. Direct traffic passed, with client CPU approximately 49–70% of one core and client ELU 0.50–0.53. Proxied stages showed client CPU approximately 64–81%, backend CPU 56–70%, **proxy CPU 104–128%** and **proxy ELU 0.907–0.988**. Native/GC threads can make process CPU exceed one core. Sampled proxy peak RSS ranged approximately **219–230 MiB**, heap peaks **77–103 MiB** during these active windows; these capacity stages did not include memory idle-recovery analysis.
+At offered 5000/sec all modes reached peak client concurrency **100**. Direct traffic passed, with client CPU approximately 49–70% of one core and client ELU 0.50–0.53. Proxied stages showed client CPU approximately 64–81%, backend CPU 56–71%, **proxy CPU 104–128%** and **proxy ELU 0.907–0.988**. Native/GC threads can make process CPU exceed one core. Sampled proxy peak RSS ranged approximately **219–230 MiB**, heap peaks **77–103 MiB** during these active windows; these capacity stages did not include memory idle-recovery analysis.
 
 Most upper-stage missed slots were concurrency-cap misses, not overdue scheduling discards. For example GET proxy run one had **15 scheduling / 768 cap misses**; JSON metrics run two had **0 / 2027**. This is consistent with limited exchange-processing capacity/host contention under the chosen client cap, not solely generator CPU exhaustion. Direct passing rates provide a useful control. The measurements do not isolate proxy computation from local TCP/GC/runtime work or prove that increasing concurrency would meet the SLO. Client-limited classification identifies the supplied-arrival constraint; it does not automatically assign its root cause exclusively to the client.
 
@@ -194,7 +194,15 @@ Harness changes covered by regression checks:
 
 Local baseline: **167 tests passed**. Final local suite: **179 passed, zero failed/cancelled/skipped**, 35.04 seconds; all prior tests retained. `npm install`, strict typecheck, build, built-package consumer (ESM/declarations, HTTP/HTTPS, health, metrics, restart), package dry-run (28 files), and report validation passed. The 18 existing fault scenarios also passed as part of the final suite. Final short failure/mixed checks also passed with explicit health-state/metrics snapshots. The intentionally failed earlier investigation artifact remains marked failed; corrected relevant runs passed.
 
-Cross-platform CI is configured for Windows/Ubuntu/macOS with Node **22.19.0 / 24.x**, full tests, package-consumer verification and tiny memory/capacity smoke checks. Actual remote results are pending the first push of this workflow; configuration alone is not runtime evidence. Local tests establish Windows/Node v24.14.0 only at this point.
+Hosted [CI run 44904692888](https://github.com/tushar-gour/LoadPilot/actions/runs/44904692888) completed **successfully in all six jobs** against implementation commit `7ea809242e31f9f1cc5a63fc948663256e9599cc`. Exact versions and results were read from the runner logs:
+
+| Actual hosted OS | Node versions actually executed | Tests per runtime | Other checks |
+|---|---|---|---|
+| Windows Server 2025 Datacenter, 10.0.26100 | 22.19.0 and 24.22.3 | 179 passed, 0 failed/skipped | All passed |
+| Ubuntu 26.04.1 LTS | 22.19.0 and 24.22.3 | 179 passed, 0 failed/skipped | All passed |
+| macOS 26.7.2 (25G332), arm64 runner | 22.19.0 and 24.22.3 | 179 passed, 0 failed/skipped | All passed |
+
+Each job installed dependencies, typechecked, ran the full suite, built, verified the ESM/declaration consumer including HTTP/HTTPS/health/metrics/restart, performed package dry-run, and executed tiny memory/capacity CLI smoke checks. The six-job total is 1074 passing test executions, not 1074 distinct tests. This documentation-only follow-up changes no tested implementation; the workflow intentionally skips documentation-only pushes. Sustained memory and numerical capacity measurements above remain **Windows 11 / Node v24.14.0 only**; CI smoke success is not cross-platform performance evidence.
 
 ## K. Unresolved questions and artifact policy
 
