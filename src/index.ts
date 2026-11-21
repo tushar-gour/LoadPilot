@@ -1,5 +1,6 @@
 export { LoadPilot } from "./LoadPilot.js";
-export type { LoadPilotOptions } from "./LoadPilot.js";
+export type { LoadPilotOptions, StopOptions, LoadPilotStatus } from "./LoadPilot.js";
+export type { ListenerTlsOptions } from "./listener/ListenerOptions.js";
 export { ServerPool } from "./server/ServerPool.js";
 export type { ServerPoolOptions } from "./server/ServerPool.js";
 export { Server } from "./server/Server.js";

@@ -43,7 +43,7 @@ const report: BenchmarkReport = { schemaVersion: 1, scenario: command, timestamp
     fixtureHealth: { intervalMs: 50, timeoutMs: 100, unhealthyThreshold: 2, healthyThreshold: 2 } },
   rows: [], faults: [], soak: [], passed: true, limitations: [
     "Local synthetic HTTP-only harness run on a shared host; CPU scheduling, loopback TCP, client hashing, TSX, native allocators, monitoring and warmup affect results. No statistical significance is claimed.",
-    "Separate generator, proxy and backend processes; no external targets. A harness-only adapter pins the existing LoadPilot listener to 127.0.0.1.",
+    "Separate generator, proxy and backend processes; no external targets. The public host option pins LoadPilot to 127.0.0.1; guarded internal diagnostics inspect native agents.",
     "Warmup is excluded from client throughput and backend counts; proxy lifetime snapshots include warmup, with measured metricsRequestDelta recorded separately.",
     "Client percentiles use 201 fixed histogram bins (0.05 ms then 10% spacing, overflow at observed max); they are approximations.",
     "Resource windows include settling and IPC snapshots; CPU percent is relative to one core. Socket counts are instrumented Node listener/agent sockets, not OS TIME_WAIT or file descriptors.",

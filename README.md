@@ -10,7 +10,7 @@ Client → LoadPilot listener → RouteMatcher → ServerPool.getNextServer()
 Client ← streamed status, headers and body ← HttpProxy ← backend
 ```
 
-- `LoadPilot` owns one HTTP listener, an optional public base route and its pool registry, and exposes optional instance metrics.
+- `LoadPilot` owns one HTTP or HTTPS listener, its sockets and admitted exchanges, an optional public base route and its pool registry, and exposes optional instance metrics.
 - `RouteMatcher` selects the longest matching pool route at complete path-segment boundaries. It has no networking or scheduling responsibilities.
 - `ServerPool` owns its backend list, Round Robin cursor and optional health monitor. Its default algorithm is `Algorithm.ROUND_ROBIN`.
 - `Server` represents a validated HTTP(S) destination, optionally including a path prefix. Credentials, query strings and fragments are rejected in backend configuration.
@@ -117,7 +117,7 @@ GET, POST, PUT, PATCH, DELETE, HEAD and OPTIONS use native backpressure-aware st
 
 Hop-by-hop headers and every header nominated by `Connection` are removed in each direction. The upstream `Host` is set to the selected backend's host and port. Valid `Content-Length` is retained; chunk framing is regenerated when necessary, including chunked GET bodies. Node may generate new connection/framing headers for each connection. Separate `Set-Cookie` headers stay separate. Request `Expect: 100-continue` is handled by the listener and is not forwarded upstream; other informational responses and HTTP trailers are not relayed.
 
-Incoming `Forwarded` and `X-Forwarded-*` values are discarded. New `X-Forwarded-For` contains only the directly connected client's socket address; `X-Forwarded-Proto` is `http` because this listener speaks HTTP; `X-Forwarded-Host` records the original client-supplied Host as **untrusted metadata**. No trusted proxy chain is inferred. Deployments behind another proxy must account for this policy.
+Incoming `Forwarded` and `X-Forwarded-*` values are stripped before rebuilding validated metadata. By default, `X-Forwarded-For` contains the socket peer, `X-Forwarded-Proto` reflects the actual HTTP/HTTPS connection, and `X-Forwarded-Host` contains a syntactically valid observed Host. Host remains client-controlled metadata. Explicit trusted-proxy handling is described below.
 
 `Location` values resolving to the selected backend's exact origin and configured path prefix are mapped back to a public origin-relative path, restoring the LoadPilot base route. Absolute, network-path, root-relative and relative redirects use the same mapping. The incoming Host is never used to construct redirects. Unrelated external destinations are preserved. Invalid redirects, same-backend destinations outside the configured prefix and mappings that would become network-path redirects have their `Location` removed because no safe public mapping exists.
 
@@ -140,7 +140,100 @@ Cookie `Path`/`Domain`, HTML links, refresh headers and application-specific abs
 
 There are no automatic retries, including for POST/payment operations. A failed attempt advances that pool's cursor once; only the next client request selects the next backend. Client upload/response disconnections cancel upstream work. Each instance owns its keep-alive upstream agents.
 
-`start()` rejects repeated/concurrent starts and bind failures such as `EADDRINUSE`. A failed start can be retried. `stop()` is idempotent once stopped; calling it during start/stop rejects. **Shutdown immediately cancels in-flight proxy exchanges and closes active and idle connections**; graceful draining is not implemented. A stopped instance can be started again.
+`start()` rejects repeated/concurrent starts and bind failures such as `EADDRINUSE`. A failed bind can be retried. `stop()` preserves immediate cancellation by default; explicit graceful shutdown allows admitted work to finish. Concurrent stop callers share the pending operation. A stopped instance can be started again.
+
+## Production Safety & Lifecycle
+
+### Bind address and HTTPS
+
+`host` optionally selects an IPv4 address, IPv6 address or hostname accepted by the platform. It is validated without rewriting the configured value. Omit it to retain Node's default all-interface binding, which can expose the listener beyond loopback. Use `host: "127.0.0.1"` for local-only HTTP; use an appropriate interface and firewall policy for deployments. Port `0` remains supported.
+
+This complete application uses two backends, optional HTTPS termination, and graceful signal handling:
+
+```ts
+import { readFile } from "node:fs/promises";
+import { LoadPilot, ServerPool, Server } from "loadpilot";
+
+const useHttps = process.env.LOADPILOT_HTTPS === "true";
+const pilot = new LoadPilot({
+  name: "Gateway",
+  host: "127.0.0.1",
+  port: 8080,
+  tls: useHttps ? {
+    key: await readFile("/run/secrets/gateway-key.pem"),
+    cert: await readFile("/run/secrets/gateway-cert.pem"),
+    minVersion: "TLSv1.2",
+  } : undefined,
+  metrics: { enabled: true },
+  pools: [new ServerPool({
+    route: "/",
+    servers: [new Server("http://127.0.0.1:3001"), new Server("http://127.0.0.1:3002")],
+    healthCheck: { enabled: true },
+  })],
+});
+
+async function terminate() {
+  try { await pilot.stop({ mode: "graceful", timeoutMs: 30_000 }); }
+  catch { process.exitCode = 1; }
+}
+try {
+  await pilot.start();
+  process.once("SIGTERM", terminate);
+  process.once("SIGINT", terminate);
+} catch (error) {
+  await pilot.stop();
+  throw error;
+}
+```
+
+Omitting `tls` creates the existing native HTTP listener. Supplying `tls` creates a native HTTPS listener and requires a valid, matching `key` and `cert` in Node's PEM/Buffer/key forms. Optional `passphrase`, `minVersion` and `maxVersion` are supported. Protocol bounds accept only TLSv1.2 or TLSv1.3, with a minimum floor of TLSv1.2 and the runtime's stronger default when applicable. Empty inputs, mismatched keys, inverted bounds and unsupported TLS fields fail clearly. Native TLS configuration errors are sanitized. Key/certificate/passphrase inputs are omitted from `pilot.options`, status, metrics and logs; they necessarily remain in the native TLS context. Protect the caller's original configuration and secret files.
+
+Inbound termination is independent of outbound HTTPS. Upstream requests and probes retain normal certificate and hostname verification. No insecure verification override is added. HTTP/2, mutual TLS configuration, SNI routing, certificate provisioning and certificate hot reload are unsupported.
+
+### Shutdown contract
+
+```ts
+await pilot.stop();                                // Existing immediate behavior
+await pilot.stop({ mode: "immediate" });           // Explicit immediate cancellation
+await pilot.stop({ mode: "graceful" });            // Finite default: 30,000 ms
+await pilot.stop({ mode: "graceful", timeoutMs: 5000 });
+```
+
+The lifecycle is `stopped → starting → started → draining → stopping → stopped`; immediate stop moves directly from started to stopping. Calling graceful stop synchronously closes admission before its Promise is returned and promptly closes the native listener to new TCP connections. Requests already admitted may continue uploading, waiting on a backend or streaming to a slow client. A new HTTP request arriving on an existing connection is rejected before matching or selection with generic 503 and `Connection: close`. An idle connection can simply close without another response. Requests admitted before the drain boundary retain their selected backend; nothing is replayed.
+
+Graceful `timeoutMs` must be an integer from 1 to 300,000. A later graceful call shares the original Promise and never extends its deadline. `stop()` or explicit immediate mode escalates a pending drain immediately. Invalid options reject even on a stopped instance. A valid stop on an already stopped instance is harmless. Starting while starting/draining/stopping, stopping during startup, and adding pools during those transitions reject clearly.
+
+The existing upstream total-exchange deadline continues unchanged during drain. Whichever failure, client disconnect, successful finish or shutdown cancellation occurs first determines the terminal outcome. At grace expiry, remaining exchanges are cancelled and inbound sockets (including incomplete headers and TLS handshakes) are destroyed. Responses already started are terminated without a second status line. Immediate mode uses the same forced cleanup without a drain period.
+
+Idle upstream connections close when draining starts. Active upstream agents remain available until work settles or is cancelled. Shutdown waits for tracked downstream responses, raw listener sockets, upstream exchanges and native request/socket close notifications; it resolves with active gauges and queues cleared. Native upstream close notification cleanup has an additional bounded 1,000 ms backstop: if it cannot settle, stop rejects and makes a fresh agent generation available for restart. Timers are cleared and unreferenced. Deadlines depend on the event loop running and cannot preempt blocking JavaScript or establish that a remote client processed every byte.
+
+Entering drain releases this listener's health-monitor ownership once. If it was the last owner, pending probes and timers are cancelled without false failures or state resets; another owner of a shared pool keeps monitoring. A new monitor lifetime on restart returns health to UNKNOWN using the existing semantics. Backend additions/removals still affect future selection only; removing a backend leaves admitted streams intact. Pools can be added while started or stopped, but not while draining. Shared pools intentionally share their backend list, cursor and health state.
+
+With metrics enabled, ordinary drain completions remain completed requests. Forced cancellations increment `shutdownCancelled`; client disconnects remain `clientCancelled`, and upstream failures/timeouts keep their existing classifications. Completed drain rejections increment root-only `requests.drainingRejections`, completed requests and local 5xx responses, without any pool/backend attribution. Incomplete rejection responses follow normal cancellation accounting. Lifetime totals persist across restart.
+
+`pilot.getStatus()` returns a frozen local snapshot of `state`, `listening`, bound `address`, `port`, `protocol`, `activeRequests` and `connections`. These counts work with metrics disabled. `activeRequests` counts outstanding handler responses; `connections` counts owned raw TCP connections, including TLS handshakes. Address/port become null after native listener closure, potentially before active draining work has settled. Status is for trusted application code; there is no automatic HTTP diagnostic endpoint.
+
+### Explicit proxy trust
+
+No peer is trusted by default. Configure only the actual ingress network, for example:
+
+```ts
+const pilot = new LoadPilot({
+  name: "BehindIngress", host: "127.0.0.1", port: 8080,
+  trustedProxies: ["127.0.0.1/32", "10.42.0.0/24", "::1/128"],
+  pools: [new ServerPool({ route: "/", servers: [new Server("http://127.0.0.1:3001")] })],
+});
+```
+
+Trust configuration accepts at most 256 literal IPv4/IPv6 addresses or CIDRs, handles IPv4-mapped IPv6 peers, and is copied/frozen. Hostnames, wildcard/trust-all shortcuts, zone identifiers, malformed ranges and universal `/0` ranges are rejected. The actual socket peer must match before any supplied forwarding metadata can be accepted.
+
+For a trusted peer, a valid `X-Forwarded-For` chain is walked from right to left through trusted hops, stopping at the first untrusted address. Only that effective address is emitted, not the original chain or its untrusted leftmost claims. Chains are limited to 1,024 characters and 16 literal IP addresses; ports, empty/malformed elements and zone identifiers discard the entire chain and fall back to the socket peer. `X-Forwarded-Proto` accepts exactly one lowercase `http` or `https`. `X-Forwarded-Host` accepts one authority of at most 260 characters: a valid ASCII hostname/IPv4 or bracketed IPv6, optionally followed by a port from 1 to 65535. URLs, credentials, paths, whitespace, control characters and comma-separated hosts are discarded.
+
+Invalid protocol/host fields fall back independently to the actual connection scheme and syntactically valid observed Host. RFC `Forwarded` is always ignored, as are all other supplied `X-Forwarded-*` fields. Trusted ingress must overwrite protocol/host metadata and correctly append its observed peer to XFF; trusting an ingress that relays arbitrary client values is unsafe. Syntactically valid Host metadata still requires an application allowlist when used for links or security decisions. Registered backend configuration alone controls upstream destinations, and rewritten public redirects remain origin-relative.
+
+### Native connection limits
+
+LoadPilot retains native defaults. On the tested Node 22/24 lines, [HTTP defaults](https://nodejs.org/docs/latest-v22.x/api/http.html) are: request reception timeout 300,000 ms, header timeout 60,000 ms (bounded by request timeout), keep-alive idle timeout 5,000 ms plus a 1,000 ms socket timeout buffer, general socket timeout 0, and maximum request header size 16 KiB unless overridden by Node runtime flags. Native HTTPS additionally has a 120,000 ms TLS handshake timeout; see [Node TLS server options](https://nodejs.org/docs/latest-v22.x/api/tls.html#tlscreateserveroptions-secureconnectionlistener). Later runtimes may change defaults. Timeout enforcement includes Node's checking cadence. These are separate from upstream and probe total deadlines. Grace expiry also closes stalled uploads, incomplete inbound requests and pending handshakes. This milestone adds no public parser-timeout/body-size, concurrency/admission-limit, WAF or DDoS policy API; apply deployment limits appropriate to your network.
 
 ## Optional backend health checks
 
@@ -260,6 +353,7 @@ The instance, each configured pool and each selected backend expose the same req
 | `requests.failed` | Forwarding connection/protocol/stream failures, upstream deadlines, or internal orchestration failures |
 | `requests.cancelled` | Exchanges cancelled by a client or shutdown, with separate `clientCancelled` and `shutdownCancelled` counters |
 | `requests.routeNotFound`, `noEligibleBackend`, `invalidTarget` | Terminal local rejection reasons, distinct from backend HTTP statuses |
+| `requests.drainingRejections` | Completed local 503 after admission closes; root only, without pool/backend selection |
 | `requests.upstreamFailures`, `upstreamTimeouts`, `internalErrors` | Terminal failure reasons; backend HTTP 500 is not an upstream failure |
 | `responses.completed` | Fully written downstream responses, including fully written proxy-generated 502/504 responses |
 | `responses.incomplete` | Exchanges ending without a complete downstream response, including cancellation before headers |
@@ -321,16 +415,16 @@ When disabled, requests allocate no metrics scope/events and capture no metrics 
 
 Snapshots include configured names, routes and backend addresses for **trusted operational code**. They do not store client headers, authorization, cookies, bodies, query strings, arbitrary client paths or incoming Host values. Do not publish raw snapshots to untrusted clients. LoadPilot does not expose `/metrics` automatically.
 
-Prometheus/OpenTelemetry exporters, tracing, TCP connection gauges, persistence, dashboards, distributed aggregation and alerting are not implemented. Active request counts are supported; they must not be interpreted as active TCP connections. Dedicated sustained load, fault-injection and resource-leak validation are still needed for production reliability claims.
+Prometheus/OpenTelemetry exporters, tracing, historical TCP connection metrics, persistence, dashboards, distributed aggregation and alerting are not implemented. `getStatus().connections` reports a current local TCP count separately from request metrics. Dedicated sustained load, fault-injection and resource-leak validation are still needed for production reliability claims.
 
 ## Limitations
 
-- HTTP/1.x client listener and HTTP/1.x HTTP(S) upstreams only; no inbound TLS termination or HTTP/2.
+- HTTP/1.x HTTP(S) client listener and upstreams only; no HTTP/2 or HTTP/3.
 - HTTP Upgrade/WebSocket and CONNECT tunneling are rejected with 501. Unexpected upstream upgrades produce 502.
-- No cookie/body/refresh rewriting, forwarding of trailers, informational-response relay, or trusted multi-proxy configuration.
+- No cookie/body/refresh rewriting, forwarding of trailers or informational-response relay. Trusted proxy metadata uses only the documented bounded X-Forwarded policy.
 - Redirect rewriting requires an exact selected-backend origin and a path inside its configured prefix, as described above.
-- No automatic failover/retries, weighted scheduling, circuit breakers, external metrics exporters, clustering or graceful shutdown draining.
-- The listener uses Node's default bind address; network exposure is controlled by the host environment.
+- No automatic failover/retries, weighted scheduling, circuit breakers, external metrics exporters or clustering.
+- Graceful drain cannot guarantee availability during an exchange or delivery beyond the network stack; event-loop stalls delay timers. Omitted host retains Node's default bind address.
 
 ## Development and verification
 
@@ -339,12 +433,13 @@ npm install
 npm run typecheck
 npm test
 npm run build
+npm run check:package
 npm pack --dry-run --cache .npm
 ```
 
 `typecheck` covers source and tests. Tests use Node's test/assert libraries and real local HTTP/HTTPS backends on allocated ports. They exercise routing, verbs, headers/cookies, Round Robin, independent listeners, dynamic registration, failures, deadlines, disconnects, incremental streams and an 8 MiB upload. Health tests control probe timers with Node's test timer mocks while exercising real network streams, including thresholds, recovery, no overlap, stale-result protection, passive signals, shared ownership and process-exit cleanup. Metrics tests cover exactly-once outcomes, concurrency, local/backend status origin, cancellations, histograms, immutable snapshots, identity churn, health statistics, disabled/enabled streaming, instrumentation fault isolation, shutdown/restart retention and process exit. The localhost TLS certificate/key under `tests/fixtures` are public test-only material; regenerate them when expired. TLS tests temporarily add that certificate to their test process's trust list and restore it afterward.
 
-Source lives under `src/`; the published package contains generated JavaScript/declarations in `dist/` and this README. Internal transport and routing helpers are not package exports. For native connection semantics, see the [Node.js HTTP documentation](https://nodejs.org/api/http.html).
+Lifecycle, TLS and proxy-security suites additionally exercise drain admission, uploads/downloads, deadlines/escalation, queued HTTP/HTTPS Agent cancellation without replacement connections, raw handshakes, client/backend disconnections, shared health ownership, bind retry, trusted/untrusted forwarding and restart. Source lives under `src/`; the published package contains generated JavaScript/declarations in `dist/` and this README. Internal transport and routing helpers are not package exports. For native connection semantics, see the [Node.js HTTP documentation](https://nodejs.org/api/http.html).
 
 ## Performance and reliability validation
 
@@ -361,3 +456,5 @@ npm run soak -- --duration 12 --concurrency 10 --sample-ms 100 --gc
 See [benchmarks/README.md](benchmarks/README.md) for configuration, limits, methodology and cleanup behavior, and [benchmarks/BASELINE.md](benchmarks/BASELINE.md) for actual reviewed measurements and limitations. Generated JSON/Markdown lives in ignored `benchmarks/results/`; it is local rather than published to GitHub. Percentiles are approximations, resource peaks are sampled, and local ratios include TCP/client/runtime overhead and measurement noise. Short successful runs do not establish production readiness or absence of long-term leaks.
 
 Memory isolation and controlled-arrival characterization add `npm run bench:memory`, `npm run bench:capacity` and `npm run bench:soak`. They reuse the same workers/generator and distinguish RSS from live heap, V8 heap capacity, external memory and ArrayBuffers. Capacity reports include dispatch and schedule-relative latency, missed arrivals, configurable SLOs and per-process saturation evidence. See [benchmarks/MEMORY_AND_CAPACITY.md](benchmarks/MEMORY_AND_CAPACITY.md) for executed findings and unresolved questions. Cross-platform CI covers Node 22.19.0/24.x without running long soaks; `npm run check:package` checks built ESM/declarations and HTTP/HTTPS behavior after a build.
+
+See [Milestone 6 validation](benchmarks/PRODUCTION_SAFETY.md) for executed lifecycle/security checks, before/after performance smoke, short sustained results and hosted CI evidence.

@@ -28,6 +28,49 @@ async function loaded(environment: Environment, path = "/get", requests = 30, co
 }
 
 const cases: { name: string; run: () => Promise<string> }[] = [
+  { name: "graceful-completion", run: () => withEnvironment({ count: 2, health: true }, async (environment) => {
+    await environment.healthy();
+    const pending = environment.load("/hang", { requests: 6, concurrency: 6 });
+    await waitFor(async () => (await environment.stats(0)).active + (await environment.stats(1)).active === 6);
+    const stopping = environment.proxy.call<ResourceState>("stop", { mode: "graceful", timeoutMs: 2000 });
+    await waitFor(async () => (await environment.proxy.call<{ state: string }>("status")).state === "draining");
+    await Promise.all(environment.backends.map((worker) => worker.call("release")));
+    successful(await pending, 6);
+    const state = await stopping; assert.equal(state.incomingSockets, 0); assert.equal(state.agentPendingRequests, 0);
+    const metrics = await environment.metrics(); accounting(metrics, 6); assert.equal(metrics.requests.shutdownCancelled, 0);
+    await environment.restartProxy(); await loaded(environment, "/get", 6); accounting(await environment.metrics(), 12);
+    return "Six admitted requests across two healthy backends completed during drain; zero sockets/queues; same-instance forwarding after restart";
+  }) },
+  { name: "graceful-deadline", run: () => withEnvironment({}, async (environment) => {
+    const pending = environment.load("/hang", { requests: 8, concurrency: 8 });
+    await waitFor(async () => (await environment.stats()).active === 8);
+    const state = await environment.proxy.call<ResourceState>("stop", { mode: "graceful", timeoutMs: 40 });
+    assert.equal((await pending).failed, 8); assert.equal(state.incomingSockets, 0); assert.equal(state.agentPendingRequests, 0);
+    const metrics = await environment.metrics(); accounting(metrics, 8);
+    assert.equal(metrics.requests.shutdownCancelled, 8); assert.equal(metrics.requests.failed, 0);
+    return "40 ms grace deadline cancelled eight stalled exchanges exactly once; all active scopes and native queues zero";
+  }) },
+  { name: "graceful-immediate-escalation", run: () => withEnvironment({}, async (environment) => {
+    const pending = environment.load("/hang", { requests: 6, concurrency: 6 });
+    await waitFor(async () => (await environment.stats()).active === 6);
+    const graceful = environment.proxy.call<ResourceState>("stop", { mode: "graceful", timeoutMs: 300_000 });
+    await waitFor(async () => (await environment.proxy.call<{ state: string }>("status")).state === "draining");
+    const immediate = environment.proxy.call<ResourceState>("stop", { mode: "immediate" });
+    for (const state of await Promise.all([graceful, immediate])) assert.equal(state.activeUpstreamExchanges, 0);
+    assert.equal((await pending).failed, 6);
+    const metrics = await environment.metrics(); accounting(metrics, 6); assert.equal(metrics.requests.shutdownCancelled, 6);
+    return "Immediate stop escalated a five-minute drain; both callers settled with six cancellations and no duplicate accounting";
+  }) },
+  { name: "backend-death-during-drain", run: () => withEnvironment({}, async (environment) => {
+    const pending = environment.load("/hang", { requests: 8, concurrency: 8, expectedStatus: 502 });
+    await waitFor(async () => (await environment.stats()).active === 8);
+    const stopping = environment.proxy.call<ResourceState>("stop", { mode: "graceful", timeoutMs: 2000 });
+    await waitFor(async () => (await environment.proxy.call<{ state: string }>("status")).state === "draining");
+    await environment.backends[0].terminate(); successful(await pending, 8); await stopping;
+    const metrics = await environment.metrics(); accounting(metrics, 8);
+    assert.equal(metrics.requests.upstreamFailures, 8); assert.equal(metrics.requests.shutdownCancelled, 0);
+    return "Backend process death during drain produced eight transport-failure 502 responses, with no shutdown misclassification";
+  }) },
   { name: "restart-keepalive", run: () => withEnvironment({}, async (environment) => {
     for (let cycle = 0; cycle < 5; cycle++) {
       await loaded(environment);

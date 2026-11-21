@@ -19,6 +19,8 @@ export interface RequestCounters {
   readonly upstreamFailures: number;
   readonly upstreamTimeouts: number;
   readonly internalErrors: number;
+  /** Completed local 503 rejections observed after admission closed. */
+  readonly drainingRejections: number;
 }
 
 export interface StatusCounters {

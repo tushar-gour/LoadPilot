@@ -1,6 +1,6 @@
 import { Agent, Server as HttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
-import { LoadPilot, ServerPool, Server } from "../src/index.js";
+import { LoadPilot, ServerPool, Server, type StopOptions } from "../src/index.js";
 import { BackendFixture } from "./fixtures/backend.js";
 import { ResourceMonitor, unavailableState, heapDiagnostics } from "./helpers/resourceMonitor.js";
 import { writeHeapSnapshot } from "node:v8";
@@ -18,32 +18,32 @@ const fixture = config.role === "backend" ? new BackendFixture(config.id ?? "bac
 const pools = (config.pools ?? []).map((entry) => new ServerPool({ route: entry.route,
   servers: entry.urls.map((url) => { localTarget(url); return new Server(url); }),
   healthCheck: { enabled: config.health ?? false, intervalMs: 50, timeoutMs: 100, unhealthyThreshold: 2, healthyThreshold: 2 } }));
-const pilot = config.role === "proxy" ? new LoadPilot({ name: "Benchmark", port: 0, pools,
+const pilot = config.role === "proxy" ? new LoadPilot({ name: "Benchmark", host: "127.0.0.1", port: 0, pools,
   metrics: { enabled: config.metrics ?? false }, upstreamTimeoutMs: config.upstreamTimeoutMs ?? 30_000 }) : undefined;
 
 function property(object: unknown, name: string): unknown {
   return object && typeof object === "object" ? Reflect.get(object, name) : undefined;
 }
 
-// Harness-only adapter: the public API currently has no bind-host option.
-// Pin its existing native listener to loopback without changing production code.
-if (pilot) {
-  const listener: unknown = property(pilot, "httpServer");
-  if (!(listener instanceof HttpServer)) throw new Error("Benchmark listener adapter needs updating");
-  const listen = listener.listen.bind(listener);
-  listener.listen = function (...args: unknown[]) {
-    if (typeof args[0] !== "number") throw new Error("Unexpected listener invocation");
-    listen({ port: args[0], host: "127.0.0.1" }); return this;
-  };
-  listener.on("connection", (socket) => { acceptedConnections++; sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
+const instrumentedAgents = new WeakSet<Agent>();
+function instrumentAgents(): void {
   for (const name of ["httpAgent", "httpsAgent"]) {
     const agent = property(property(pilot, "proxy"), name);
     if (!(agent instanceof Agent)) throw new Error("Benchmark agent adapter needs updating");
+    if (instrumentedAgents.has(agent)) continue;
+    instrumentedAgents.add(agent);
     const create = agent.createConnection.bind(agent);
     agent.createConnection = function (...args) { upstreamConnectionsCreated++; return create(...args); };
     // Diagnostic-only control; production continues to use its configured Agent.
     if (config.upstreamKeepAlive !== undefined) Reflect.set(agent, "keepAlive", config.upstreamKeepAlive);
   }
+}
+
+if (pilot) {
+  const listener: unknown = property(pilot, "httpServer");
+  if (!(listener instanceof HttpServer)) throw new Error("Benchmark listener adapter needs updating");
+  listener.on("connection", (socket) => { acceptedConnections++; sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
+  instrumentAgents();
   listener.on("request", (req, res) => {
     const exchange = { req, res }; exchanges.add(exchange);
     const done = () => exchanges.delete(exchange);
@@ -99,6 +99,7 @@ process.on("message", (message: unknown) => {
       case "resources": return monitor.snapshot();
       case "resetResources": monitor.reset(); return true;
       case "state": return state();
+      case "status": return pilot?.getStatus();
       case "diagnostics": {
         const resources = monitor.snapshot(), sample = resources.samples.at(-1)!;
         const listener = property(pilot, "httpServer"), collector = property(pilot, "metricsCollector");
@@ -121,9 +122,9 @@ process.on("message", (message: unknown) => {
       case "resetStats": fixture?.reset(); return true;
       case "release": fixture?.release(); return true;
       case "health": fixture?.configure(payload as { status?: number; delayMs?: number; sequence?: number[] }); return true;
-      case "stop": await pilot?.stop(); await fixture?.stop(); return state();
+      case "stop": await pilot?.stop(payload as StopOptions | undefined); await fixture?.stop(); return state();
       case "start":
-        if (pilot) { await pilot.start(); info.url = `http://127.0.0.1:${pilot.port}`; info.port = pilot.port ?? undefined; }
+        if (pilot) { await pilot.start(); instrumentAgents(); info.url = `http://127.0.0.1:${pilot.port}`; info.port = pilot.port ?? undefined; }
         if (fixture) info.url = await fixture.start();
         return info;
       case "remove": {

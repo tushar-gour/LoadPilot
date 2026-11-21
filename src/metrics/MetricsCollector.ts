@@ -11,11 +11,11 @@ import type {
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 type Outcome = "completed" | "failed" | "cancelled";
 type Reason = "clientCancelled" | "shutdownCancelled" | "routeNotFound" |
-  "noEligibleBackend" | "invalidTarget" | "upstreamFailures" | "upstreamTimeouts" | "internalErrors";
+  "noEligibleBackend" | "invalidTarget" | "upstreamFailures" | "upstreamTimeouts" | "internalErrors" | "drainingRejections";
 
 export type RequestMetricEvent = ProxyEvent |
   { type: "pool"; pool: ServerPool } | { type: "selected"; server: Server } |
-  { type: "rejected"; reason: "routeNotFound" | "noEligibleBackend" | "invalidTarget" | "internalErrors" };
+  { type: "rejected"; reason: "routeNotFound" | "noEligibleBackend" | "invalidTarget" | "internalErrors" | "drainingRejections" };
 
 export type RequestObserver = (event: RequestMetricEvent) => void;
 
@@ -97,7 +97,7 @@ class Group {
   readonly requests: Mutable<RequestCounters> = {
     total: 0, active: 0, completed: 0, failed: 0, cancelled: 0,
     clientCancelled: 0, shutdownCancelled: 0, routeNotFound: 0, noEligibleBackend: 0,
-    invalidTarget: 0, upstreamFailures: 0, upstreamTimeouts: 0, internalErrors: 0,
+    invalidTarget: 0, upstreamFailures: 0, upstreamTimeouts: 0, internalErrors: 0, drainingRejections: 0,
   };
   private readonly status = statusCounters();
   private readonly backendStatus = statusCounters();
