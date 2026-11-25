@@ -14,9 +14,10 @@ if (!["backend", "proxy", "client"].includes(config.role)) throw new Error("Inva
 const sockets = new Set<Socket>();
 const exchanges = new Set<{ req: IncomingMessage; res: ServerResponse }>();
 let acceptedConnections = 0, upstreamConnectionsCreated = 0, snapshots = 0;
-const fixture = config.role === "backend" ? new BackendFixture(config.id ?? "backend-0") : undefined;
+const fixture = config.role === "backend" ? new BackendFixture(config.id ?? "backend-0", config.applicationDelayMs) : undefined;
 const pools = (config.pools ?? []).map((entry) => new ServerPool({ route: entry.route,
-  servers: entry.urls.map((url) => { localTarget(url); return new Server(url); }),
+  algorithm: entry.algorithm,
+  servers: entry.urls.map((url, index) => { localTarget(url); return new Server(url, { weight: entry.weights?.[index] }); }),
   healthCheck: { enabled: config.health ?? false, intervalMs: 50, timeoutMs: 100, unhealthyThreshold: 2, healthyThreshold: 2 } }));
 const pilot = config.role === "proxy" ? new LoadPilot({ name: "Benchmark", host: "127.0.0.1", port: 0, pools,
   metrics: { enabled: config.metrics ?? false }, upstreamTimeoutMs: config.upstreamTimeoutMs ?? 30_000 }) : undefined;

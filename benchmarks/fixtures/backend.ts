@@ -55,6 +55,7 @@ export class BackendFixture {
         res.writeHead(this.health.sequence.length ? this.health.sequence[this.health.index++ % this.health.sequence.length] : this.health.status);
         res.end(); return;
       }
+      if (this.applicationDelayMs) await sleep(this.applicationDelayMs, undefined, { signal });
       if (endpoint === "reset") { req.socket.destroy(); return; }
       if (endpoint === "hang") return;
       if (endpoint === "partial") {
@@ -94,7 +95,8 @@ export class BackendFixture {
       res.destroy(error instanceof Error ? error : new Error("Fixture handler failed"));
     });
   });
-  constructor(readonly id: string) {
+  constructor(readonly id: string, private readonly applicationDelayMs = 0) {
+    if (!Number.isInteger(applicationDelayMs) || applicationDelayMs < 0 || applicationDelayMs > 120000) throw new Error("Invalid application delay");
     this.server.on("connection", (socket) => { this.sockets.add(socket); socket.once("close", () => this.sockets.delete(socket)); });
   }
   private empty() { return { applicationRequests: 0, healthProbes: 0, completed: 0, aborted: 0,

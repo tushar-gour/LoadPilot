@@ -136,3 +136,14 @@ Reports show offered/attempted/completed/failed rates, scheduling misses/delay, 
 `npm run check:package` compiles a consumer against built package declarations and exercises built HTTP/HTTPS forwarding, health, metrics and restart using the existing public TLS test fixture. GitHub Actions runs Node 22.19.0 and 24.x on Windows/Ubuntu/macOS, with full tests, build/package checks and tiny harness smoke commands. There are no timing-based throughput assertions or long CI soaks. Documentation-only pushes do not rerun this matrix. A workflow definition is not proof of a passed job: consult the actual run linked from [MEMORY_AND_CAPACITY.md](MEMORY_AND_CAPACITY.md).
 
 New raw artifacts default to `memory-isolation.*`, `capacity.*` and `extended-soak.*`; labels can separate repetitions. They remain local/ignored. The committed [MEMORY_AND_CAPACITY.md](MEMORY_AND_CAPACITY.md) records actual executed findings, failed/partial attempts and unexecuted longer validation.
+
+
+## Algorithm comparison (all six strategies)
+
+```sh
+npm run bench:algorithms -- --duration 5 --warmup 1 --concurrency 30 --repetitions 3 --label six-algorithms
+npm run bench:algorithms -- --profiles heterogeneous,unhealthy --duration 30 --warmup 3 --concurrency 100 --rate 1000 --repetitions 3 --label paced-algorithms
+npm run bench:soak -- --mode extended --duration 1800 --warmup 2 --idle 15 --gc --label release-soak
+```
+
+The comparison runs all six algorithms in rotated order, using fresh separate processes and real HTTP. Profiles: uniform (equal weights/no intentional delay), weighted (5:3:2 weights), heterogeneous (5:3:2 weights and 2/10/40 ms application delay), unhealthy (same configuration with the third backend excluded before warmup). Health and metrics are enabled consistently. It records client throughput, latency, missed arrivals, actual backend distribution, CPU/memory and validates counts, health exclusion and zero tracked resources after shutdown. The report is local JSON in ignored `benchmarks/results/`; no measured comparison is claimed until execution. The extended soak command exercises the pre-existing mixed-workload retention harness; it is not an all-algorithm soak.

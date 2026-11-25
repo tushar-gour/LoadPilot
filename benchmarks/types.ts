@@ -1,4 +1,4 @@
-import type { LoadPilotMetrics } from "../src/index.js";
+import type { Algorithm, LoadPilotMetrics } from "../src/index.js";
 
 export interface LoadOptions {
   targets: string[];
@@ -72,7 +72,8 @@ export interface BackendStats {
 export interface WorkerInfo { url?: string; port?: number; role: "backend" | "proxy" | "client" }
 export interface WorkerConfig {
   role: WorkerInfo["role"]; id?: string; port?: number;
-  pools?: { route: string; urls: string[] }[];
+  pools?: { route: string; urls: string[]; algorithm?: Algorithm; weights?: number[] }[];
+  applicationDelayMs?: number;
   metrics?: boolean; health?: boolean; upstreamTimeoutMs?: number; sampleMs?: number; upstreamKeepAlive?: boolean;
 }
 

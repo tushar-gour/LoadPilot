@@ -33,3 +33,6 @@ jobs:
       - run: npm pack --dry-run --cache .npm
       - run: npm run bench:memory -- --scenarios idle --duration 0.1 --idle 0 --warmup 0 --label ci-memory
       - run: npm run bench:capacity -- --rates 100 --profiles get --duration 0.1 --warmup 0 --repetitions 1 --label ci-capacity
+      - name: Six-strategy benchmark smoke
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24.x'
+        run: npm run bench:algorithms -- --profiles uniform,unhealthy --duration 0.2 --warmup 0.1 --concurrency 8 --repetitions 1 --label ci-algorithms
