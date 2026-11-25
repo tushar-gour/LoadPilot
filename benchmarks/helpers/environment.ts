@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import type { AggregateMetrics, LoadPilotMetrics } from "../../src/index.js";
+import type { Algorithm, AggregateMetrics, LoadPilotMetrics } from "../../src/index.js";
 import { Worker, closeWorkers, waitFor } from "./processes.js";
 import type { BackendStats, LoadOptions, LoadResult, ResourceState, WorkerInfo } from "../types.js";
 
@@ -7,6 +7,7 @@ export interface EnvironmentOptions {
   count?: number; metrics?: boolean; health?: boolean; timeoutMs?: number;
   routes?: { route: string; indices: number[] }[]; sampleMs?: number; gc?: boolean;
   direct?: boolean; upstreamKeepAlive?: boolean;
+  algorithm?: Algorithm; weights?: number[]; applicationDelaysMs?: number[];
 }
 
 export class Environment {
@@ -19,14 +20,14 @@ export class Environment {
     const environment = new Environment(options);
     try {
       for (let index = 0; index < (options.count ?? 1); index++) {
-        const backend = await Worker.start({ role: "backend", id: `backend-${index}`, sampleMs: options.sampleMs }, options.gc);
+        const backend = await Worker.start({ role: "backend", id: `backend-${index}`, sampleMs: options.sampleMs, applicationDelayMs: options.applicationDelaysMs?.[index] }, options.gc);
         environment.backends.push(backend); environment.workers.push(backend);
       }
       const routes = options.routes ?? [{ route: "/", indices: environment.backends.map((_, index) => index) }];
       if (!options.direct) {
         environment.proxy = await Worker.start({ role: "proxy", metrics: options.metrics ?? true, health: options.health,
           upstreamTimeoutMs: options.timeoutMs, sampleMs: options.sampleMs, upstreamKeepAlive: options.upstreamKeepAlive,
-          pools: routes.map((route) => ({ route: route.route, urls: route.indices.map((index) => environment.backends[index].info.url ?? "") })) }, options.gc);
+          pools: routes.map((route) => ({ route: route.route, urls: route.indices.map((index) => environment.backends[index].info.url ?? ""), algorithm: options.algorithm, weights: route.indices.map(index => options.weights?.[index] ?? 1) })) }, options.gc);
         environment.workers.push(environment.proxy);
       }
       environment.client = await Worker.start({ role: "client", sampleMs: options.sampleMs });
@@ -57,7 +58,7 @@ export class Environment {
   async replaceBackend(index: number): Promise<void> {
     const previous = this.backends[index];
     await previous.terminate();
-    const worker = await Worker.start({ role: "backend", id: `backend-${index}`, port: previous.info.port, sampleMs: this.options.sampleMs }, this.options.gc);
+    const worker = await Worker.start({ role: "backend", id: `backend-${index}`, port: previous.info.port, sampleMs: this.options.sampleMs, applicationDelayMs: this.options.applicationDelaysMs?.[index] }, this.options.gc);
     this.backends[index] = worker;
     this.workers.splice(this.workers.indexOf(previous), 1, worker);
   }

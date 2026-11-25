@@ -14,6 +14,7 @@
     "typecheck": "tsc -p tsconfig.bench.json",
     "prepack": "npm run build",
     "bench": "tsx benchmarks/run.ts bench",
+    "bench:algorithms": "tsx benchmarks/algorithms.ts",
     "bench:full": "tsx benchmarks/run.ts bench --full",
     "bench:stream": "tsx benchmarks/run.ts stream",
     "fault": "tsx benchmarks/run.ts fault",
