@@ -7,7 +7,12 @@ import { readFile } from "node:fs/promises";
 import { once } from "node:events";
 import { setTimeout as sleep } from "node:timers/promises";
 import { LoadPilot, ServerPool, Server, Algorithm, HealthState } from "loadpilot";
-import type { LoadPilotOptions, HealthCheckOptions, LoadPilotMetrics, ListenerTlsOptions, StopOptions, LoadPilotStatus } from "loadpilot";
+import type { LoadPilotOptions, HealthCheckOptions, LoadPilotMetrics, ListenerTlsOptions, StopOptions, LoadPilotStatus, ServerOptions } from "loadpilot";
+const weight: ServerOptions = { weight: 2 };
+for (const algorithm of Object.values(Algorithm)) {
+  const server = new Server("http://127.0.0.1:3001", weight);
+  assert.equal(new ServerPool({ route: "/", algorithm, servers: [server] }).getNextServer(), server);
+}
 
 const cert = await readFile(new URL("./fixtures/localhost-cert.pem", import.meta.url), "utf8");
 const key = await readFile(new URL("./fixtures/localhost-key.pem", import.meta.url), "utf8");
