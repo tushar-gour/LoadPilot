@@ -1,10 +1,6 @@
-class RoundRobin {
-  public getNextIndex(currentIndex: number, totalItems: number): number {
-    if (totalItems <= 0) {
-      throw new Error("Total items must be greater than zero.");
-    }
-    return (currentIndex + 1) % totalItems;
+import type { AlgorithmStrategy, SelectionContext } from "./SchedulingTypes.js";
+export class RoundRobin implements AlgorithmStrategy {
+  select(context: SelectionContext): number | undefined {
+    return context.firstEligible();
   }
 }
-
-export default new RoundRobin();

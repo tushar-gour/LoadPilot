@@ -199,3 +199,15 @@ test("Least Connections releases failed, timed-out and forced-shutdown exchanges
   assert.equal((await exchange(pilot)).body.toString(), "b");
   assert.equal((await exchange(pilot)).body.toString(), "a");
 });
+
+for (const algorithm of Object.values(Algorithm)) {
+  test(`${algorithm}: empty pool and membership edits retain independent cursors`, () => {
+    const a = server(3001), b = server(3002);
+    const p = createPool(algorithm, [a, b]);
+    const q = createPool(algorithm, [a, b]);
+    p.getNextServer(); p.remove(a); p.remove(b);
+    assert.equal(p.getNextServer(), null);
+    p.add(a); assert.equal(p.getNextServer(), a);
+    assert.ok([a, b].includes(q.getNextServer()!));
+  });
+}

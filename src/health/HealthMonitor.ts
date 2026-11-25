@@ -1,9 +1,4 @@
-import {
-  request as httpRequest,
-  type ClientRequest,
-  type IncomingMessage,
-} from "node:http";
-import { request as httpsRequest } from "node:https";
+import { HttpHealthProbe } from "./HttpHealthProbe.js";
 import type { Server } from "../server/Server.js";
 import {
   HealthState,
@@ -43,6 +38,7 @@ interface BackendRecord {
 
 /** Per-pool active monitoring. It never owns or cancels application requests. */
 export class HealthMonitor {
+  private readonly transport = new HttpHealthProbe();
   private readonly records = new Map<Server, BackendRecord>();
   private readonly owners = new Set<object>();
   private metricsEnabled = false;
@@ -217,69 +213,15 @@ export class HealthMonitor {
 
   private probe(record: BackendRecord): void {
     if (!this.isActive(record) || record.cancel) return;
-    let req: ClientRequest | undefined;
-    let res: IncomingMessage | undefined;
-    let settled = false;
-    const finish = (success?: boolean, timedOut = false) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(deadline);
-      req?.destroy();
-      res?.destroy();
+    this.transport.run(record.server, this.options, cancel => {
+      record.cancel = cancel;
+    }, (success, timedOut = false) => {
       record.cancel = undefined;
-      // Cancellation has no outcome. Identity also excludes removed/re-added
-      // entries and stale callbacks from previous monitoring lifecycles.
+      // Identity excludes removed registrations and stale monitoring lifecycles.
       if (success !== undefined && this.isActive(record)) {
         this.recordOutcome(record, success, timedOut);
         this.schedule(record, this.options.intervalMs);
       }
-    };
-    record.cancel = () => finish();
-    const deadline = setTimeout(
-      () => finish(false, true),
-      this.options.timeoutMs,
-    );
-    deadline.unref();
-    try {
-      const backend = new URL(record.server.baseUrl);
-      req = (backend.protocol === "https:" ? httpsRequest : httpRequest)(
-        backend,
-        {
-          method: "GET",
-          agent: false,
-          path: backend.pathname.replace(/\/+$/, "") + this.options.path,
-          headers: { host: backend.host, connection: "close" },
-        },
-      );
-      req.once("socket", (socket) => socket.unref());
-      req.once("error", () => finish(false));
-      req.once("upgrade", (_response, socket) => {
-        socket.destroy();
-        finish(false);
-      });
-      req.once("response", (response) => {
-        res = response;
-        response.once("error", () => finish(false));
-        response.once("aborted", () => finish(false));
-        if (settled) {
-          response.destroy();
-          return;
-        }
-        if (
-          !response.statusCode ||
-          response.statusCode < 200 ||
-          response.statusCode >= 300
-        ) {
-          finish(false);
-          return;
-        }
-        response.once("end", () => finish(response.complete));
-        // Discard incrementally; the same deadline also bounds a stalled body.
-        response.resume();
-      });
-      req.end();
-    } catch {
-      finish(false);
-    }
+    });
   }
 }

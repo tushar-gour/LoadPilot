@@ -17,7 +17,7 @@
   "scripts": {
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc",
-    "test": "tsx --test tests/test.ts tests/proxy.test.ts tests/health.test.ts tests/metrics.test.ts tests/reliability.test.ts tests/memory-reliability.test.ts tests/lifecycle.test.ts tests/tls.test.ts tests/proxy-security.test.ts tests/algorithms.test.ts",
+    "test": "tsx --test tests/test.ts tests/proxy.test.ts tests/health.test.ts tests/metrics.test.ts tests/reliability.test.ts tests/memory-reliability.test.ts tests/lifecycle.test.ts tests/tls.test.ts tests/proxy-security.test.ts tests/algorithms.test.ts tests/architecture.test.ts",
     "typecheck": "tsc -p tsconfig.bench.json",
     "prepack": "npm run build",
     "bench": "tsx benchmarks/run.ts bench",
