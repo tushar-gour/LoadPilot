@@ -1,6 +1,7 @@
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import { getHeapStatistics, getHeapSpaceStatistics, getHeapCodeStatistics } from "node:v8";
 import type { Resources, ResourceSample, ResourceState } from "../types.js";
+import { TimeSeries } from "./timeSeries.js";
 
 export const unavailableState = (): ResourceState => ({ activeRequests: null, activeUpstreamExchanges: null,
   incomingSockets: null, upstreamBusySockets: null, upstreamIdleSockets: null,
@@ -24,7 +25,7 @@ export class ResourceMonitor {
   private started = performance.now();
   private cpu = process.cpuUsage();
   private elu = performance.eventLoopUtilization();
-  private samples: ResourceSample[] = [];
+  private samples: TimeSeries<ResourceSample>;
   private taken = 0;
   private peakRss = 0;
   private peakHeap = 0;
@@ -35,12 +36,13 @@ export class ResourceMonitor {
 
   constructor(private readonly state = unavailableState, readonly intervalMs = 200) {
     if (!Number.isInteger(intervalMs) || intervalMs < 50 || intervalMs > 30_000) throw new Error("sample interval must be 50–30000 ms");
+    this.samples = new TimeSeries<ResourceSample>(intervalMs, 600);
     this.lag.enable(); this.take();
     this.timer = setInterval(() => this.take(), intervalMs); this.timer.unref();
   }
   reset(): void {
     this.started = performance.now(); this.cpu = process.cpuUsage(); this.elu = performance.eventLoopUtilization();
-    this.samples = []; this.taken = 0; this.peakRss = 0; this.peakHeap = 0; this.peakRead = 0; this.peakWrite = 0;
+    this.samples = new TimeSeries<ResourceSample>(this.intervalMs, 600); this.taken = 0; this.peakRss = 0; this.peakHeap = 0; this.peakRead = 0; this.peakWrite = 0;
     this.peakExternal = 0; this.peakArrayBuffers = 0;
     this.lag.reset(); this.take();
   }
@@ -51,23 +53,23 @@ export class ResourceMonitor {
     this.peakExternal = Math.max(this.peakExternal, sample.external); this.peakArrayBuffers = Math.max(this.peakArrayBuffers, sample.arrayBuffers);
     this.peakRead = Math.max(this.peakRead, sample.bufferedRequestBytes ?? 0);
     this.peakWrite = Math.max(this.peakWrite, sample.bufferedResponseBytes ?? 0);
-    if (this.samples.length >= 600) this.samples = this.samples.filter((_, index) => index % 2 === 0);
-    this.samples.push(sample); this.taken++;
+    this.samples.add(sample); this.taken++;
   }
   snapshot(): Resources {
     this.take();
     const cpu = process.cpuUsage(this.cpu), elapsed = performance.now() - this.started;
     const resources: Record<string, number> = {};
     for (const name of process.getActiveResourcesInfo()) resources[name] = (resources[name] ?? 0) + 1;
-    const xMean = this.samples.reduce((sum, item) => sum + item.elapsedMs / 1000, 0) / this.samples.length;
-    const yMean = this.samples.reduce((sum, item) => sum + item.heapUsed, 0) / this.samples.length;
+    const samples = this.samples.values();
+    const xMean = samples.reduce((sum, item) => sum + item.elapsedMs / 1000, 0) / samples.length;
+    const yMean = samples.reduce((sum, item) => sum + item.heapUsed, 0) / samples.length;
     let numerator = 0, denominator = 0;
-    for (const item of this.samples) {
+    for (const item of samples) {
       const x = item.elapsedMs / 1000 - xMean;
       numerator += x * (item.heapUsed - yMean); denominator += x * x;
     }
     const hasLag = this.lag.count > 0;
-    return { samples: [...this.samples], samplesTaken: this.taken, sampleIntervalMs: this.intervalMs,
+    return { samples, samplesTaken: this.taken, sampleIntervalMs: this.intervalMs,
       peakRss: this.peakRss, peakHeapUsed: this.peakHeap, peakBufferedRequestBytes: this.peakRead, peakBufferedResponseBytes: this.peakWrite,
       peakExternal: this.peakExternal, peakArrayBuffers: this.peakArrayBuffers,
       cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000,

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { capacityDecision, highestPassing, memoryTrend, slope } from "../benchmarks/helpers/analysis.js";
+import { TimeSeries } from "../benchmarks/helpers/timeSeries.js";
 import { arrivalPlan } from "../benchmarks/helpers/loadGenerator.js";
 import { ResourceMonitor, heapDiagnostics } from "../benchmarks/helpers/resourceMonitor.js";
 import { Histogram, hashBytes } from "../benchmarks/helpers/statistics.js";
@@ -87,6 +88,35 @@ test("Memory slopes distinguish short evidence, sustained growth and plateaus", 
     assert.equal(memoryTrend([], 0).classification, "Inconclusive");
     assert.equal(memoryTrend(points, 1000).classification, "Likely warmup or allocator retention");
     assert.equal(memoryTrend(points.map((point, index) => ({ ...point, sample: { ...point.sample, rss: index * 10 * 1048576 } })), 1000).classification, "Suspicious retained growth");
+  } finally { monitor.close(); }
+});
+
+test("Time-series retention stays bounded and spans the entire elapsed run", () => {
+  const series = new TimeSeries<{ elapsedMs: number; value: number }>(1, 64);
+  for (let i = 0; i < 100000; i++) series.add({ elapsedMs: i, value: i });
+  const values = series.values();
+  assert.ok(values.length <= 64);
+  assert.ok(values[0]!.elapsedMs < 100000 / 10);
+  assert.equal(values.at(-1)!.elapsedMs, 99999);
+  for (let quarter = 0; quarter < 4; quarter++) assert.ok(values.some(v => Math.floor(v.elapsedMs / 25000) === quarter));
+  assert.throws(() => series.add({ elapsedMs: 1, value: 1 }), /Non-monotonic/);
+});
+
+test("Sparse historical checkpoints and a dense short tail cannot establish memory stability or growth", () => {
+  const monitor = new ResourceMonitor();
+  try {
+    const base: DiagnosticCheckpoint = { label: "settled-GC", elapsedMs: 0, sample: monitor.snapshot().samples.at(-1)!, heap: heapDiagnostics(), rssMinusHeapTotal: 0, resources: {}, listeners: {}, metricScopes: null };
+    const point = (elapsedMs: number, rss: number) => ({ ...base, elapsedMs, sample: { ...base.sample, rss, heapUsed: 10*1048576, external: 3*1048576 } });
+    const points = [point(0, 100*1048576), point(100, 100*1048576), ...Array.from({ length: 240 }, (_, i) => point(1776000 + i*100, (100+i/10)*1048576))];
+    const trend = memoryTrend(points, 1000);
+    assert.equal(trend.classification, "Inconclusive");
+    assert.equal(trend.lateRssBytesPerSecond, null);
+    const steady = Array.from({length: 61}, (_, i) => point(i*30000, 100*1048576));
+    assert.equal(memoryTrend(steady, 1000).classification, "No concerning growth observed");
+    const growing = steady.map((p,i) => point(p.elapsedMs, (100+i*5)*1048576));
+    assert.equal(memoryTrend(growing, 1000).classification, "Suspicious retained growth");
+    const burst = [...steady.slice(0,-1), ...Array.from({length: 200}, (_, i) => point(1790000+i*50, 100*1048576)), steady.at(-1)!];
+    assert.equal(memoryTrend(burst, 1000).classification, "No concerning growth observed");
   } finally { monitor.close(); }
 });
 
