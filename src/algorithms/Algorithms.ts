@@ -55,9 +55,10 @@ class AlgorithmDispatcher {
       case Algorithm.WEIGHTED_LEAST_CONNECTIONS:
         return this.minimum(candidates, state => state.activeRequests / effectiveWeight(state));
       case Algorithm.LEAST_RESPONSE_TIME: {
-        // Learn an idle, unsampled backend once before preferring measured latency.
-        const cold = candidates.filter(candidate => candidate.state.latencyMs === undefined && candidate.state.activeRequests === 0);
-        if (cold.length) return cold[0];
+        // Give each registration one initial opportunity, not endless priority
+        // when a failed/cancelled first request produces no valid latency sample.
+        const cold = candidates.find(candidate => candidate.state.lastSelected === 0 && candidate.state.activeRequests === 0);
+        if (cold) return cold;
         // Deterministic exploration prevents permanently starving slower/stale observations.
         if (selection % 32 === 0) return this.minimum(candidates, state => state.lastSelected);
         const measured = candidates.filter(candidate => candidate.state.latencyMs !== undefined);
@@ -75,7 +76,8 @@ class AlgorithmDispatcher {
     tieScore?: (state: SchedulingState) => number,
   ): SchedulingCandidate {
     let best = candidates[0]!;
-    for (const candidate of candidates.slice(1)) {
+    for (let index = 1; index < candidates.length; index++) {
+      const candidate = candidates[index]!;
       const value = score(candidate.state), previous = score(best.state);
       if (value < previous || (value === previous && tieScore && tieScore(candidate.state) < tieScore(best.state))) best = candidate;
     }

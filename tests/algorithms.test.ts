@@ -107,21 +107,25 @@ test("Least Response Time learns cold backends, smooths samples, explores and ig
 
 for (const algorithm of Object.values(Algorithm)) {
   test(`${algorithm}: live forwarding excludes unhealthy backends and handles empty eligibility`, limits, async t => {
-    let healthy = false;
+    let healthyA = false, healthyB = true;
     const a = await backend(t, (req, res) => {
-      if (req.url === "/health") { res.statusCode = healthy ? 200 : 503; res.end(); }
+      if (req.url === "/health") { res.statusCode = healthyA ? 200 : 503; res.end(); }
       else res.end("a");
     });
     const b = await backend(t, (req, res) => {
-      if (req.url === "/health") { res.statusCode = healthy ? 200 : 503; res.end(); }
+      if (req.url === "/health") { res.statusCode = healthyB ? 200 : 503; res.end(); }
       else res.end("b");
     });
     const p = new ServerPool({ route: "/", algorithm, servers: [new Server(a.url, { weight: 2 }), new Server(b.url)],
       healthCheck: { enabled: true, intervalMs: 10, timeoutMs: 1000, unhealthyThreshold: 1, healthyThreshold: 1 } });
     const pilot = await start(t, { pools: [p], metrics: { enabled: false } });
+    await until(() => p.getHealthStatus().some(item => item.state === HealthState.UNHEALTHY) &&
+      p.getHealthStatus().some(item => item.state === HealthState.HEALTHY));
+    for (let i = 0; i < 8; i++) assert.equal((await exchange(pilot)).body.toString(), "b");
+    healthyB = false;
     await until(() => p.getHealthStatus().every(item => item.state === HealthState.UNHEALTHY));
     assert.equal((await exchange(pilot)).status, 503);
-    healthy = true;
+    healthyA = healthyB = true;
     await until(() => p.getHealthStatus().every(item => item.state === HealthState.HEALTHY));
     for (let i = 0; i < 8; i++) assert.equal((await exchange(pilot)).status, 200);
   });
@@ -160,4 +164,38 @@ test("Least Response Time uses real upstream headers and not optional metrics", 
   assert.equal((await exchange(pilot)).body.toString(), "slow");
   assert.equal((await exchange(pilot)).body.toString(), "fast");
   for (let i = 0; i < 5; i++) assert.equal((await exchange(pilot)).body.toString(), "fast");
+});
+
+test("Least Response Time does not continuously select a backend whose first exchange failed", () => {
+  const [a, b] = [server(3001), server(3002)];
+  const p = createPool(Algorithm.LEAST_RESPONSE_TIME, [a, b]);
+  assert.equal(p.getNextServer(), a);
+  p.beginRequest(a)!();
+  assert.equal(p.getNextServer(), b);
+  p.beginRequest(b)!(20);
+  for (let i = 0; i < 10; i++) assert.equal(p.getNextServer(), b);
+});
+
+test("Least Connections releases failed, timed-out and forced-shutdown exchanges before restart", limits, async t => {
+  const entered = signal();
+  const a = await backend(t, (req, res) => {
+    if (req.url === "/fail") { req.socket.destroy(); return; }
+    if (req.url === "/timeout") return;
+    if (req.url === "/hold") { entered.resolve(); return; }
+    res.end("a");
+  });
+  const b = await backend(t, (_req, res) => res.end("b"));
+  const p = createPool(Algorithm.LEAST_CONNECTIONS, [new Server(a.url), new Server(b.url)]);
+  const pilot = await start(t, { pools: [p], metrics: { enabled: false }, upstreamTimeoutMs: 500 });
+  assert.equal((await exchange(pilot, { path: "/fail" })).status, 502);
+  assert.equal((await exchange(pilot)).body.toString(), "b");
+  assert.equal((await exchange(pilot, { path: "/timeout" })).status, 504);
+  assert.equal((await exchange(pilot)).body.toString(), "b");
+  const held = open(pilot, { path: "/hold" });
+  const rejected = assert.rejects(held.promise); held.request.end();
+  await entered.promise;
+  await pilot.stop(); await rejected;
+  await pilot.start();
+  assert.equal((await exchange(pilot)).body.toString(), "b");
+  assert.equal((await exchange(pilot)).body.toString(), "a");
 });
