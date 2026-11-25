@@ -7,7 +7,7 @@ import { Server as HttpsServer } from "node:https";
 import type { Socket } from "node:net";
 import { ServerPool } from "./server/ServerPool.js";
 import { normalizeRoute } from "./routing/normalizeRoute.js";
-import { routeMatcher } from "./routing/RouteMatcher.js";
+import { RequestRouter } from "./routing/RequestRouter.js";
 import { HttpProxy, sendError } from "./proxy/HttpProxy.js";
 import type { Duplex } from "node:stream";
 import {
@@ -23,6 +23,7 @@ import {
   validateHost,
   type ListenerTlsOptions,
 } from "./listener/ListenerOptions.js";
+import { stopConfiguration } from "./listener/stopConfiguration.js";
 import { ForwardedHeaders } from "./proxy/ForwardedHeaders.js";
 
 export interface LoadPilotOptions {
@@ -74,37 +75,12 @@ interface Shutdown {
   timer?: ReturnType<typeof setTimeout>;
   error?: Error;
 }
-function stopConfiguration(options?: StopOptions): {
-  mode: "immediate" | "graceful";
-  timeoutMs: number;
-} {
-  if (options === undefined) return { mode: "immediate", timeoutMs: 0 };
-  if (
-    !options ||
-    typeof options !== "object" ||
-    Array.isArray(options) ||
-    Object.keys(options).some((key) => !["mode", "timeoutMs"].includes(key))
-  )
-    throw new Error("stop options must specify immediate or graceful mode.");
-  if (options.mode !== "immediate" && options.mode !== "graceful")
-    throw new Error("stop mode must be immediate or graceful.");
-  if (options.mode === "immediate") {
-    if (options.timeoutMs !== undefined)
-      throw new Error("timeoutMs applies only to graceful stop.");
-    return { mode: "immediate", timeoutMs: 0 };
-  }
-  const timeoutMs = options.timeoutMs ?? 30_000;
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000)
-    throw new Error(
-      "Graceful timeoutMs must be an integer between 1 and 300000.",
-    );
-  return { mode: "graceful", timeoutMs };
-}
 
 class LoadPilot {
   private readonly poolList = new Map<string, ServerPool>();
   private readonly httpServer: HttpServer | HttpsServer;
   private readonly proxy: HttpProxy;
+  private readonly router: RequestRouter;
   private readonly metricsCollector: MetricsCollector;
   private state: LifecycleState = "stopped";
   private readonly sockets = new Set<Socket>();
@@ -155,6 +131,7 @@ class LoadPilot {
       trustedProxies: forwarding.addresses,
     });
     this.proxy = new HttpProxy(upstreamTimeoutMs, forwarding);
+    this.router = new RequestRouter(this.options.route, this.poolList, this.proxy);
     this.metricsCollector = new MetricsCollector(
       options.name,
       this.options.metrics.enabled,
@@ -256,66 +233,7 @@ class LoadPilot {
       sendError(res, 503);
       return;
     }
-    // Only origin-form targets are accepted. Keep raw escapes, slashes and query
-    // bytes: WHATWG URL parsing would normalize dot segments before routing.
-    const target = req.url ?? "";
-    if (
-      !target.startsWith("/") ||
-      target.startsWith("//") ||
-      /[\s\x00-\x1f\x7f\\#]/.test(target) ||
-      /%(?![\da-f]{2})/i.test(target)
-    ) {
-      req.resume();
-      observe?.({ type: "rejected", reason: "invalidTarget" });
-      sendError(res, 400);
-      return;
-    }
-    const queryIndex = target.indexOf("?");
-    const pathname = queryIndex < 0 ? target : target.slice(0, queryIndex);
-    let settleSelection: ((headersMs?: number) => void) | undefined;
-    try {
-      const pool = routeMatcher.getServerPoolFromRoute(
-        pathname,
-        this.options.route,
-        this.poolList,
-      );
-      if (!pool) {
-        req.resume();
-        observe?.({ type: "rejected", reason: "routeNotFound" });
-        sendError(res, 404);
-        return;
-      }
-      observe?.({ type: "pool", pool });
-      const server = pool.getNextServer();
-      if (!server) {
-        req.resume();
-        observe?.({ type: "rejected", reason: "noEligibleBackend" });
-        sendError(res, 503);
-        return;
-      }
-      settleSelection = pool.beginRequest(server);
-      observe?.({ type: "selected", server });
-      const path =
-        this.options.route === "/" ?
-          pathname
-        : pathname.slice(this.options.route.length) || "/";
-      const query = queryIndex < 0 ? "" : target.slice(queryIndex);
-      this.proxy.forward(
-        req,
-        res,
-        server,
-        path + query,
-        this.options.route,
-        () => pool.reportTransportFailure(server),
-        observe,
-        settleSelection,
-      );
-    } catch {
-      settleSelection?.();
-      req.resume();
-      observe?.({ type: "rejected", reason: "internalErrors" });
-      sendError(res, 500);
-    }
+    this.router.forward(req, res, observe);
   }
 
   addPool(pool: ServerPool): void {

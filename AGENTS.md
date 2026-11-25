@@ -6,6 +6,8 @@ These permanent instructions apply to all subsequent tasks in `tushar-gour/LoadP
 
 Preserve `LoadPilot → RouteMatcher → ServerPool → HttpProxy → Backend`. Health monitoring controls backend eligibility within each pool; it does not replace the selection algorithm. Preserve existing tests, architectural boundaries, and unrelated developer work. Use strict TypeScript with NodeNext ES modules and `.js` suffixes in relative imports.
 
+Each production class has its own file and one cohesive responsibility. Keep interfaces, data types and pure functions as such rather than forcing classes for their own sake. Prefer composition and explicit dependencies; avoid algorithm-specific branches outside the strategy composition root. Preserve public exports and request/connection lifetime invariants.
+
 ## Verification
 
 Run the applicable checks before committing:

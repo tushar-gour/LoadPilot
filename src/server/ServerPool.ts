@@ -1,9 +1,7 @@
-import {
-  Algorithm,
-  Algorithms,
-  type SchedulingCandidate,
-  type SchedulingState,
-} from "../algorithms/Algorithms.js";
+import { Algorithm, createAlgorithm } from "../algorithms/Algorithms.js";
+import { PoolScheduler } from "./PoolScheduler.js";
+import type { BackendRegistration, Registration } from "./BackendRegistration.js";
+export type { BackendRegistration } from "./BackendRegistration.js";
 import { Server } from "./Server.js";
 import { normalizeRoute } from "../routing/normalizeRoute.js";
 import { HealthMonitor } from "../health/HealthMonitor.js";
@@ -18,22 +16,11 @@ import type {
   HealthProbeMetrics,
 } from "../metrics/MetricsTypes.js";
 
-/** @internal Identity for one continuous registration lifetime of a Server. */
-export interface BackendRegistration {
-  readonly id: number;
-  readonly server: Server;
-  readonly registrations: number;
-}
-
 export interface ServerPoolOptions {
   route: string;
   servers?: readonly Server[];
   algorithm?: Algorithm;
   healthCheck?: HealthCheckOptions;
-}
-
-interface Registration extends BackendRegistration, SchedulingState {
-  registrations: number;
 }
 
 /** Owns its backend list and independent scheduling state. */
@@ -44,26 +31,24 @@ class ServerPool {
   private readonly serverList: Server[];
   private readonly healthMonitor: HealthMonitor;
   private readonly registrations = new Map<Server, Registration>();
-  private weightedEligible = new Set<Registration>();
-  private selectionCount = 0;
+  private readonly scheduler: PoolScheduler;
   private nextBackendId = 1;
-  private currentIndex = 0;
 
   constructor(options: ServerPoolOptions) {
     this.route = normalizeRoute(options.route);
     this.algorithm = options.algorithm ?? Algorithm.ROUND_ROBIN;
-    if (!Object.values(Algorithm).includes(this.algorithm))
-      throw new Error("Unsupported load balancing algorithm.");
+    const strategy = createAlgorithm(this.algorithm);
     this.serverList = [...(options.servers ?? [])];
     this.healthCheck = resolveHealthCheck(options.healthCheck);
     this.healthMonitor = new HealthMonitor(this.healthCheck);
+    this.scheduler = new PoolScheduler(strategy, this.serverList, this.registrations, server => this.healthMonitor.isEligible(server));
     for (const server of this.serverList) this.register(server);
   }
 
   add(server: Server): void {
     this.serverList.push(server);
     this.register(server);
-    this.resetWeightedCredits();
+    this.scheduler.membershipChanged();
   }
 
   /** Remove the first registration of this Server object, if present. */
@@ -71,14 +56,12 @@ class ServerPool {
     const index = this.serverList.indexOf(server);
     if (index < 0) return false;
     this.serverList.splice(index, 1);
-    if (index < this.currentIndex) this.currentIndex--;
-    if (this.currentIndex >= this.serverList.length) this.currentIndex = 0;
     const registration = this.registrations.get(server);
     if (registration && --registration.registrations === 0) {
       this.registrations.delete(server);
       this.healthMonitor.remove(server);
     }
-    this.resetWeightedCredits();
+    this.scheduler.membershipChanged(index);
     return true;
   }
 
@@ -149,93 +132,11 @@ class ServerPool {
    * in-flight closure, and a re-added Server gets a fresh independent identity.
    */
   beginRequest(server: Server): ((headersMs?: number) => void) | undefined {
-    if (
-      this.algorithm !== Algorithm.LEAST_CONNECTIONS &&
-      this.algorithm !== Algorithm.WEIGHTED_LEAST_CONNECTIONS &&
-      this.algorithm !== Algorithm.LEAST_RESPONSE_TIME
-    )
-      return undefined;
-    const registration = this.registrations.get(server);
-    if (!registration)
-      throw new Error("Cannot reserve an unregistered backend.");
-    registration.activeRequests++;
-    let settled = false;
-    return (headersMs?: number) => {
-      if (settled) return;
-      settled = true;
-      registration.activeRequests--;
-      if (
-        this.algorithm === Algorithm.LEAST_RESPONSE_TIME &&
-        headersMs !== undefined &&
-        Number.isFinite(headersMs) &&
-        headersMs >= 0
-      ) {
-        registration.latencyMs =
-          registration.latencyMs === undefined ?
-            headersMs
-          : 0.2 * headersMs + 0.8 * registration.latencyMs;
-      }
-    };
-  }
-
-  private resetWeightedCredits(): void {
-    if (this.algorithm !== Algorithm.WEIGHTED_ROUND_ROBIN) return;
-    for (const registration of this.registrations.values())
-      registration.credit = 0;
-    this.weightedEligible.clear();
+    return this.scheduler.beginRequest(server);
   }
 
   getNextServer(): Server | null {
-    const count = this.serverList.length;
-    if (this.algorithm === Algorithm.ROUND_ROBIN) {
-      // Preserve registration order and the existing cursor/health semantics.
-      for (let checked = 0; checked < count; checked++) {
-        const server = this.serverList[this.currentIndex]!;
-        this.currentIndex = Algorithms.getNextIndex(
-          this.algorithm,
-          this.currentIndex,
-          count,
-        );
-        if (this.healthMonitor.isEligible(server)) return server;
-      }
-      return null;
-    }
-
-    const candidates: SchedulingCandidate[] = [];
-    const eligible = new Set<Registration>();
-    for (let offset = 0; offset < count; offset++) {
-      const index = (this.currentIndex + offset) % count;
-      const server = this.serverList[index]!;
-      if (!this.healthMonitor.isEligible(server)) continue;
-      const registration = this.registrations.get(server)!;
-      // RANDOM samples registration slots; other strategies share state for
-      // repeated registration of the same Server object within this pool.
-      if (this.algorithm === Algorithm.RANDOM || !eligible.has(registration)) {
-        candidates.push({ index, state: registration });
-      }
-      eligible.add(registration);
-    }
-    if (
-      this.algorithm === Algorithm.WEIGHTED_ROUND_ROBIN &&
-      (eligible.size !== this.weightedEligible.size ||
-        [...eligible].some(
-          (registration) => !this.weightedEligible.has(registration),
-        ))
-    ) {
-      this.resetWeightedCredits();
-      this.weightedEligible = eligible;
-    }
-    const selected = Algorithms.select(
-      this.algorithm,
-      candidates,
-      this.selectionCount + 1,
-    );
-    if (!selected) return null;
-    this.currentIndex = (selected.index + 1) % count;
-    if (this.algorithm === Algorithm.LEAST_RESPONSE_TIME) {
-      selected.state.lastSelected = ++this.selectionCount;
-    }
-    return this.serverList[selected.index]!;
+    return this.scheduler.select();
   }
 }
 
