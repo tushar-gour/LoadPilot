@@ -23,16 +23,26 @@ export interface SchedulingCandidate {
   readonly state: SchedulingState;
 }
 
-const effectiveWeight = (state: SchedulingState): number => state.weight * state.registrations;
+const effectiveWeight = (state: SchedulingState): number =>
+  state.weight * state.registrations;
 
 class AlgorithmDispatcher {
-  getNextIndex(algo: Algorithm, currentIndex: number, totalItems: number): number {
-    if (algo !== Algorithm.ROUND_ROBIN) throw new Error(`Unsupported index-only algorithm: ${String(algo)}`);
+  getNextIndex(
+    algo: Algorithm,
+    currentIndex: number,
+    totalItems: number,
+  ): number {
+    if (algo !== Algorithm.ROUND_ROBIN)
+      throw new Error(`Unsupported index-only algorithm: ${String(algo)}`);
     return RoundRobin.getNextIndex(currentIndex, totalItems);
   }
 
   /** The pool has already filtered health and ordered candidates for tie-breaking. */
-  select(algo: Algorithm, candidates: readonly SchedulingCandidate[], selection: number): SchedulingCandidate | undefined {
+  select(
+    algo: Algorithm,
+    candidates: readonly SchedulingCandidate[],
+    selection: number,
+  ): SchedulingCandidate | undefined {
     if (candidates.length === 0) return undefined;
     switch (algo) {
       case Algorithm.WEIGHTED_ROUND_ROBIN: {
@@ -51,22 +61,39 @@ class AlgorithmDispatcher {
       case Algorithm.RANDOM:
         return candidates[Math.floor(Math.random() * candidates.length)];
       case Algorithm.LEAST_CONNECTIONS:
-        return this.minimum(candidates, state => state.activeRequests);
+        return this.minimum(candidates, (state) => state.activeRequests);
       case Algorithm.WEIGHTED_LEAST_CONNECTIONS:
-        return this.minimum(candidates, state => state.activeRequests / effectiveWeight(state));
+        return this.minimum(
+          candidates,
+          (state) => state.activeRequests / effectiveWeight(state),
+        );
       case Algorithm.LEAST_RESPONSE_TIME: {
         // Give each registration one initial opportunity, not endless priority
         // when a failed/cancelled first request produces no valid latency sample.
-        const cold = candidates.find(candidate => candidate.state.lastSelected === 0 && candidate.state.activeRequests === 0);
+        const cold = candidates.find(
+          (candidate) =>
+            candidate.state.lastSelected === 0 &&
+            candidate.state.activeRequests === 0,
+        );
         if (cold) return cold;
         // Deterministic exploration prevents permanently starving slower/stale observations.
-        if (selection % 32 === 0) return this.minimum(candidates, state => state.lastSelected);
-        const measured = candidates.filter(candidate => candidate.state.latencyMs !== undefined);
-        if (!measured.length) return this.minimum(candidates, state => state.activeRequests);
-        return this.minimum(measured, state => state.latencyMs!, state => state.activeRequests);
+        if (selection % 32 === 0)
+          return this.minimum(candidates, (state) => state.lastSelected);
+        const measured = candidates.filter(
+          (candidate) => candidate.state.latencyMs !== undefined,
+        );
+        if (!measured.length)
+          return this.minimum(candidates, (state) => state.activeRequests);
+        return this.minimum(
+          measured,
+          (state) => state.latencyMs!,
+          (state) => state.activeRequests,
+        );
       }
       default:
-        throw new Error(`Unsupported load balancing algorithm: ${String(algo)}`);
+        throw new Error(
+          `Unsupported load balancing algorithm: ${String(algo)}`,
+        );
     }
   }
 
@@ -78,8 +105,15 @@ class AlgorithmDispatcher {
     let best = candidates[0]!;
     for (let index = 1; index < candidates.length; index++) {
       const candidate = candidates[index]!;
-      const value = score(candidate.state), previous = score(best.state);
-      if (value < previous || (value === previous && tieScore && tieScore(candidate.state) < tieScore(best.state))) best = candidate;
+      const value = score(candidate.state),
+        previous = score(best.state);
+      if (
+        value < previous ||
+        (value === previous &&
+          tieScore &&
+          tieScore(candidate.state) < tieScore(best.state))
+      )
+        best = candidate;
     }
     return best;
   }

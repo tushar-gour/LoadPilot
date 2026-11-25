@@ -50,7 +50,10 @@ export interface LatencySummary {
   readonly p95Ms: number;
   readonly p99Ms: number;
   /** null denotes the overflow bucket, keeping snapshots JSON-safe. */
-  readonly buckets: readonly Readonly<{ upperBoundMs: number | null; count: number }>[];
+  readonly buckets: readonly Readonly<{
+    upperBoundMs: number | null;
+    count: number;
+  }>[];
 }
 
 export interface HealthProbeMetrics {
@@ -92,10 +95,15 @@ export interface BackendMetrics extends AggregateMetrics {
 export interface PoolMetrics extends AggregateMetrics {
   readonly route: string;
   readonly eligibility: Readonly<{
-    registered: number; registrations: number; unknown: number;
-    healthy: number; unhealthy: number; eligible: number;
+    registered: number;
+    registrations: number;
+    unknown: number;
+    healthy: number;
+    unhealthy: number;
+    eligible: number;
   }>;
-  readonly health: HealthProbeMetrics & Readonly<{ enabled: boolean; collecting: boolean }>;
+  readonly health: HealthProbeMetrics &
+    Readonly<{ enabled: boolean; collecting: boolean }>;
   readonly backends: readonly BackendMetrics[];
 }
 

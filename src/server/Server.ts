@@ -14,7 +14,9 @@ class Server {
     }
     const weight = options.weight === undefined ? 1 : options.weight;
     if (!Number.isSafeInteger(weight) || weight < 1 || weight > 1_000_000) {
-      throw new Error("Backend weight must be an integer between 1 and 1000000.");
+      throw new Error(
+        "Backend weight must be an integer between 1 and 1000000.",
+      );
     }
     let url: URL;
     try {
@@ -35,7 +37,10 @@ class Server {
     this.baseUrl = url.toString().replace(/\/$/, "");
     this.weight = weight;
     // Prevent JavaScript callers from invalidating scheduling arithmetic.
-    Object.defineProperty(this, "weight", { writable: false, configurable: false });
+    Object.defineProperty(this, "weight", {
+      writable: false,
+      configurable: false,
+    });
   }
 }
 export { Server };

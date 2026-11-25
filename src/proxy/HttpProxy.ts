@@ -1,6 +1,10 @@
 import {
-  Agent as HttpAgent, request as httpRequest, STATUS_CODES,
-  type IncomingHttpHeaders, type IncomingMessage, type ServerResponse,
+  Agent as HttpAgent,
+  request as httpRequest,
+  STATUS_CODES,
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  type ServerResponse,
 } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import type { Server } from "../server/Server.js";
@@ -8,35 +12,53 @@ import { ForwardedHeaders } from "./ForwardedHeaders.js";
 import { Socket } from "node:net";
 import type { EventEmitter } from "node:events";
 
-interface CloseWatch { promise: Promise<void>; cleanup: () => void }
+interface CloseWatch {
+  promise: Promise<void>;
+  cleanup: () => void;
+}
 function watchClose(stream: EventEmitter & { closed: boolean }): CloseWatch {
   let onClose = () => {};
-  const promise = stream.closed ? Promise.resolve() : new Promise<void>((resolve) => { onClose = resolve; stream.once("close", onClose); });
+  const promise =
+    stream.closed ?
+      Promise.resolve()
+    : new Promise<void>((resolve) => {
+        onClose = resolve;
+        stream.once("close", onClose);
+      });
   return { promise, cleanup: () => stream.off("close", onClose) };
 }
 
 function managedAgent<T extends HttpAgent>(agent: T) {
-  const gate = { closed: false }, create = agent.createConnection.bind(agent);
+  const gate = { closed: false },
+    create = agent.createConnection.bind(agent);
   agent.createConnection = function (...args) {
     if (!gate.closed) return create(...args);
     // Native Agent can assign cancelled queued requests after socket closure.
     // Give that native cleanup path an unconnected socket, never fresh DNS/TCP.
-    const socket = new Socket(); queueMicrotask(() => socket.destroy()); return socket;
+    const socket = new Socket();
+    queueMicrotask(() => socket.destroy());
+    return socket;
   };
-  return { agent, closeGate: () => { gate.closed = true; } };
+  return {
+    agent,
+    closeGate: () => {
+      gate.closed = true;
+    },
+  };
 }
 
 export type ProxyEvent =
-  { type: "response"; statusCode: number; headersMs: number } |
-  { type: "completed" } |
-  { type: "failure"; reason: "upstream" | "timeout" } |
-  { type: "cancelled"; reason: "client" | "shutdown" };
+  | { type: "response"; statusCode: number; headersMs: number }
+  | { type: "completed" }
+  | { type: "failure"; reason: "upstream" | "timeout" }
+  | { type: "cancelled"; reason: "client" | "shutdown" };
 export type ProxyObserver = (event: ProxyEvent) => void;
 
 function notify(observer: ProxyObserver | undefined, event: ProxyEvent): void {
   if (!observer) return;
-  try { observer(event); }
-  catch {
+  try {
+    observer(event);
+  } catch {
     // Only optional instrumentation is isolated; transport errors keep their
     // existing handlers and must never become telemetry callback errors.
     return;
@@ -44,13 +66,27 @@ function notify(observer: ProxyObserver | undefined, event: ProxyEvent): void {
 }
 
 const hopByHop = new Set([
-  "connection", "keep-alive", "proxy-connection", "transfer-encoding", "te",
-  "trailer", "upgrade", "proxy-authenticate", "proxy-authorization",
+  "connection",
+  "keep-alive",
+  "proxy-connection",
+  "transfer-encoding",
+  "te",
+  "trailer",
+  "upgrade",
+  "proxy-authenticate",
+  "proxy-authorization",
 ]);
 
 const transportErrors = new Set([
-  "ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH",
-  "EHOSTUNREACH", "ETIMEDOUT", "EPIPE", "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "ETIMEDOUT",
+  "EPIPE",
+  "ECONNABORTED",
 ]);
 
 function endToEndHeaders(source: IncomingHttpHeaders): IncomingHttpHeaders {
@@ -77,12 +113,17 @@ export function sendError(res: ServerResponse, status: number): void {
   res.writeHead(status, {
     "content-type": "text/plain; charset=utf-8",
     "content-length": Buffer.byteLength(body),
-    "connection": "close",
+    connection: "close",
   });
   res.end(body);
 }
 
-function rewriteLocation(location: string, backend: URL, upstreamPath: string, baseRoute: string): string | undefined {
+function rewriteLocation(
+  location: string,
+  backend: URL,
+  upstreamPath: string,
+  baseRoute: string,
+): string | undefined {
   let destination: URL;
   try {
     destination = new URL(location, `${backend.origin}${upstreamPath}`);
@@ -91,7 +132,11 @@ function rewriteLocation(location: string, backend: URL, upstreamPath: string, b
   }
   if (destination.origin !== backend.origin) return location;
   const prefix = backend.pathname.replace(/\/+$/, "");
-  if (prefix && destination.pathname !== prefix && !destination.pathname.startsWith(`${prefix}/`)) {
+  if (
+    prefix &&
+    destination.pathname !== prefix &&
+    !destination.pathname.startsWith(`${prefix}/`)
+  ) {
     // No public mapping exists outside the configured backend path prefix.
     return undefined;
   }
@@ -111,21 +156,37 @@ export class HttpProxy {
   private closing = false;
   private closingPromise: Promise<void> | undefined;
 
-  constructor(private readonly timeoutMs: number, private readonly forwarding = new ForwardedHeaders()) { this.resetAgents(); }
-
-  private resetAgents(): void {
-    const plain = managedAgent(new HttpAgent({ keepAlive: true })), secure = managedAgent(new HttpsAgent({ keepAlive: true }));
-    this.httpAgent = plain.agent; this.httpsAgent = secure.agent;
-    this.closeGates = () => { plain.closeGate(); secure.closeGate(); };
+  constructor(
+    private readonly timeoutMs: number,
+    private readonly forwarding = new ForwardedHeaders(),
+  ) {
+    this.resetAgents();
   }
 
-  open(): void { this.closing = false; this.closingPromise = undefined; }
+  private resetAgents(): void {
+    const plain = managedAgent(new HttpAgent({ keepAlive: true })),
+      secure = managedAgent(new HttpsAgent({ keepAlive: true }));
+    this.httpAgent = plain.agent;
+    this.httpsAgent = secure.agent;
+    this.closeGates = () => {
+      plain.closeGate();
+      secure.closeGate();
+    };
+  }
 
-  get activeCount(): number { return this.active.size; }
+  open(): void {
+    this.closing = false;
+    this.closingPromise = undefined;
+  }
+
+  get activeCount(): number {
+    return this.active.size;
+  }
 
   closeIdleConnections(): void {
     for (const agent of [this.httpAgent, this.httpsAgent]) {
-      for (const sockets of Object.values(agent.freeSockets)) for (const socket of sockets ?? []) socket.destroy();
+      for (const sockets of Object.values(agent.freeSockets))
+        for (const socket of sockets ?? []) socket.destroy();
     }
   }
 
@@ -133,22 +194,38 @@ export class HttpProxy {
    * Starts an exchange and owns its streams until finish/close/error/deadline.
    * Deliberately returns void: every asynchronous event has a managed handler.
    */
-  forward(req: IncomingMessage, res: ServerResponse, server: Server, path: string, baseRoute: string,
-    onTransportFailure?: () => void, observer?: ProxyObserver, onSettled?: (headersMs?: number) => void): void {
-    if (this.closing) { onSettled?.(); sendError(res, 503); return; }
+  forward(
+    req: IncomingMessage,
+    res: ServerResponse,
+    server: Server,
+    path: string,
+    baseRoute: string,
+    onTransportFailure?: () => void,
+    observer?: ProxyObserver,
+    onSettled?: (headersMs?: number) => void,
+  ): void {
+    if (this.closing) {
+      onSettled?.();
+      sendError(res, 503);
+      return;
+    }
     const started = observer || onSettled ? performance.now() : 0;
     const backend = new URL(server.baseUrl);
     const upstreamPath = backend.pathname.replace(/\/+$/, "") + path;
     const headers = endToEndHeaders(req.headers);
     for (const name of Object.keys(headers)) {
-      if (name === "forwarded" || name.startsWith("x-forwarded-")) delete headers[name];
+      if (name === "forwarded" || name.startsWith("x-forwarded-"))
+        delete headers[name];
     }
     headers.host = backend.host;
     this.forwarding.apply(headers, req);
     // LoadPilot handles Expect locally (Node's 100 Continue), not upstream.
     delete headers.expect;
-    if (headers["content-length"] === undefined &&
-        (req.headers["transfer-encoding"] !== undefined || req.headers["content-length"] !== undefined)) {
+    if (
+      headers["content-length"] === undefined &&
+      (req.headers["transfer-encoding"] !== undefined ||
+        req.headers["content-length"] !== undefined)
+    ) {
       // Regenerate framing, including for chunked GET/DELETE request bodies.
       headers["transfer-encoding"] = "chunked";
     }
@@ -173,7 +250,8 @@ export class HttpProxy {
       response?.unpipe(res);
       // A fully parsed message can still have unread buffered data. Destroy it
       // on cancellation so backpressure cannot strand a pooled upstream socket.
-      if (!response?.readableEnded || !upstream.writableFinished) upstream.destroy();
+      if (!response?.readableEnded || !upstream.writableFinished)
+        upstream.destroy();
       if (response && !response.readableEnded) response.destroy();
       if (!req.readableEnded && !req.destroyed) req.resume();
     };
@@ -184,10 +262,18 @@ export class HttpProxy {
       if (!res.destroyed) res.destroy();
     };
     const clientCancel = () => cancel("client");
-    const shutdownCancel = () => { const closed = watchClose(upstream); cancel("shutdown"); return closed; };
+    const shutdownCancel = () => {
+      const closed = watchClose(upstream);
+      cancel("shutdown");
+      return closed;
+    };
     const fail = (status: number, transportFailure = false) => {
       if (settled) return;
-      if (observer) notify(observer, { type: "failure", reason: status === 504 ? "timeout" : "upstream" });
+      if (observer)
+        notify(observer, {
+          type: "failure",
+          reason: status === 504 ? "timeout" : "upstream",
+        });
       finish();
       if (transportFailure) onTransportFailure?.();
       sendError(res, status);
@@ -205,8 +291,12 @@ export class HttpProxy {
       if (observer) notify(observer, { type: "completed" });
       finish(headersMs);
     });
-    res.once("close", () => { if (!res.writableFinished) clientCancel(); });
-    upstream.once("error", (error: NodeJS.ErrnoException) => fail(502, transportErrors.has(error.code ?? "")));
+    res.once("close", () => {
+      if (!res.writableFinished) clientCancel();
+    });
+    upstream.once("error", (error: NodeJS.ErrnoException) =>
+      fail(502, transportErrors.has(error.code ?? "")),
+    );
     upstream.once("upgrade", (_message, socket) => {
       socket.destroy();
       fail(502);
@@ -215,17 +305,29 @@ export class HttpProxy {
       response = message;
       message.once("error", () => fail(502, true));
       message.once("aborted", () => fail(502, true));
-      message.once("close", () => { if (!message.complete) fail(502, true); });
+      message.once("close", () => {
+        if (!message.complete) fail(502, true);
+      });
       if (settled) {
         message.destroy();
         return;
       }
       if (observer || onSettled) headersMs = performance.now() - started;
-      if (observer) notify(observer, { type: "response", statusCode: message.statusCode ?? 502, headersMs: headersMs! });
+      if (observer)
+        notify(observer, {
+          type: "response",
+          statusCode: message.statusCode ?? 502,
+          headersMs: headersMs!,
+        });
       try {
         const responseHeaders = endToEndHeaders(message.headers);
         if (responseHeaders.location !== undefined) {
-          const location = rewriteLocation(responseHeaders.location, backend, upstreamPath, baseRoute);
+          const location = rewriteLocation(
+            responseHeaders.location,
+            backend,
+            upstreamPath,
+            baseRoute,
+          );
           if (location === undefined) delete responseHeaders.location;
           else responseHeaders.location = location;
         }
@@ -242,29 +344,47 @@ export class HttpProxy {
 
   close(): Promise<void> {
     if (this.closingPromise) return this.closingPromise;
-    this.closing = true; this.closeGates();
+    this.closing = true;
+    this.closeGates();
     const agents = [this.httpAgent, this.httpsAgent];
-    const sockets = new Set(agents.flatMap((agent) => [...Object.values(agent.sockets), ...Object.values(agent.freeSockets)].flatMap((list) => list ?? [])));
+    const sockets = new Set(
+      agents.flatMap((agent) =>
+        [
+          ...Object.values(agent.sockets),
+          ...Object.values(agent.freeSockets),
+        ].flatMap((list) => list ?? []),
+      ),
+    );
     const watches = [...sockets].map(watchClose);
     // A prior client cancellation may already have removed its exchange from
     // active while the native Agent still retains that destroyed queue entry.
-    for (const agent of agents) for (const requests of Object.values(agent.requests)) {
-      for (const request of requests ?? []) watches.push(watchClose(request));
-    }
+    for (const agent of agents)
+      for (const requests of Object.values(agent.requests)) {
+        for (const request of requests ?? []) watches.push(watchClose(request));
+      }
     for (const cancel of this.active) watches.push(cancel());
     for (const agent of agents) agent.destroy();
     this.closingPromise = new Promise<void>((resolve, reject) => {
       let settled = false;
       const finish = (error?: Error) => {
         if (settled) return;
-        settled = true; clearTimeout(deadline); for (const watch of watches) watch.cleanup();
+        settled = true;
+        clearTimeout(deadline);
+        for (const watch of watches) watch.cleanup();
         // Old generations stay gated even if native callbacks arrive later.
         this.resetAgents();
-        if (error) reject(error); else resolve();
+        if (error) reject(error);
+        else resolve();
       };
-      const deadline = setTimeout(() => finish(new Error("Upstream shutdown cleanup exceeded 1000 ms.")), 1000);
+      const deadline = setTimeout(
+        () => finish(new Error("Upstream shutdown cleanup exceeded 1000 ms.")),
+        1000,
+      );
       deadline.unref();
-      void Promise.all(watches.map((watch) => watch.promise)).then(() => finish(), () => finish(new Error("Upstream shutdown cleanup failed.")));
+      void Promise.all(watches.map((watch) => watch.promise)).then(
+        () => finish(),
+        () => finish(new Error("Upstream shutdown cleanup failed.")),
+      );
     });
     return this.closingPromise;
   }

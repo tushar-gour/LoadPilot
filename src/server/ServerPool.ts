@@ -1,9 +1,22 @@
-import { Algorithm, Algorithms, type SchedulingCandidate, type SchedulingState } from "../algorithms/Algorithms.js";
+import {
+  Algorithm,
+  Algorithms,
+  type SchedulingCandidate,
+  type SchedulingState,
+} from "../algorithms/Algorithms.js";
 import { Server } from "./Server.js";
 import { normalizeRoute } from "../routing/normalizeRoute.js";
 import { HealthMonitor } from "../health/HealthMonitor.js";
-import { resolveHealthCheck, type HealthCheckOptions, type HealthCheckConfiguration, type BackendHealthStatus } from "../health/HealthCheck.js";
-import type { BackendHealthMetrics, HealthProbeMetrics } from "../metrics/MetricsTypes.js";
+import {
+  resolveHealthCheck,
+  type HealthCheckOptions,
+  type HealthCheckConfiguration,
+  type BackendHealthStatus,
+} from "../health/HealthCheck.js";
+import type {
+  BackendHealthMetrics,
+  HealthProbeMetrics,
+} from "../metrics/MetricsTypes.js";
 
 /** @internal Identity for one continuous registration lifetime of a Server. */
 export interface BackendRegistration {
@@ -19,7 +32,9 @@ export interface ServerPoolOptions {
   healthCheck?: HealthCheckOptions;
 }
 
-interface Registration extends BackendRegistration, SchedulingState { registrations: number }
+interface Registration extends BackendRegistration, SchedulingState {
+  registrations: number;
+}
 
 /** Owns its backend list and independent scheduling state. */
 class ServerPool {
@@ -37,7 +52,8 @@ class ServerPool {
   constructor(options: ServerPoolOptions) {
     this.route = normalizeRoute(options.route);
     this.algorithm = options.algorithm ?? Algorithm.ROUND_ROBIN;
-    if (!Object.values(Algorithm).includes(this.algorithm)) throw new Error("Unsupported load balancing algorithm.");
+    if (!Object.values(Algorithm).includes(this.algorithm))
+      throw new Error("Unsupported load balancing algorithm.");
     this.serverList = [...(options.servers ?? [])];
     this.healthCheck = resolveHealthCheck(options.healthCheck);
     this.healthMonitor = new HealthMonitor(this.healthCheck);
@@ -69,8 +85,17 @@ class ServerPool {
   private register(server: Server): void {
     const registration = this.registrations.get(server);
     if (registration) registration.registrations++;
-    else this.registrations.set(server, { id: this.nextBackendId++, server, registrations: 1,
-      weight: server.weight, activeRequests: 0, latencyMs: undefined, credit: 0, lastSelected: 0 });
+    else
+      this.registrations.set(server, {
+        id: this.nextBackendId++,
+        server,
+        registrations: 1,
+        weight: server.weight,
+        activeRequests: 0,
+        latencyMs: undefined,
+        credit: 0,
+        lastSelected: 0,
+      });
     this.healthMonitor.add(server);
   }
 
@@ -85,10 +110,13 @@ class ServerPool {
   }
 
   /** @internal One idempotent opt-in for the actual shared health monitor. */
-  enableHealthMetrics(): void { this.healthMonitor.enableMetrics(); }
+  enableHealthMetrics(): void {
+    this.healthMonitor.enableMetrics();
+  }
 
   /** @internal Pool-lifetime health totals, including removed registrations. */
-  getHealthMetrics(): HealthProbeMetrics & Readonly<{ enabled: boolean; collecting: boolean }> {
+  getHealthMetrics(): HealthProbeMetrics &
+    Readonly<{ enabled: boolean; collecting: boolean }> {
     return this.healthMonitor.getMetrics();
   }
 
@@ -121,28 +149,39 @@ class ServerPool {
    * in-flight closure, and a re-added Server gets a fresh independent identity.
    */
   beginRequest(server: Server): ((headersMs?: number) => void) | undefined {
-    if (this.algorithm !== Algorithm.LEAST_CONNECTIONS &&
-        this.algorithm !== Algorithm.WEIGHTED_LEAST_CONNECTIONS &&
-        this.algorithm !== Algorithm.LEAST_RESPONSE_TIME) return undefined;
+    if (
+      this.algorithm !== Algorithm.LEAST_CONNECTIONS &&
+      this.algorithm !== Algorithm.WEIGHTED_LEAST_CONNECTIONS &&
+      this.algorithm !== Algorithm.LEAST_RESPONSE_TIME
+    )
+      return undefined;
     const registration = this.registrations.get(server);
-    if (!registration) throw new Error("Cannot reserve an unregistered backend.");
+    if (!registration)
+      throw new Error("Cannot reserve an unregistered backend.");
     registration.activeRequests++;
     let settled = false;
     return (headersMs?: number) => {
       if (settled) return;
       settled = true;
       registration.activeRequests--;
-      if (this.algorithm === Algorithm.LEAST_RESPONSE_TIME &&
-          headersMs !== undefined && Number.isFinite(headersMs) && headersMs >= 0) {
-        registration.latencyMs = registration.latencyMs === undefined
-          ? headersMs : 0.2 * headersMs + 0.8 * registration.latencyMs;
+      if (
+        this.algorithm === Algorithm.LEAST_RESPONSE_TIME &&
+        headersMs !== undefined &&
+        Number.isFinite(headersMs) &&
+        headersMs >= 0
+      ) {
+        registration.latencyMs =
+          registration.latencyMs === undefined ?
+            headersMs
+          : 0.2 * headersMs + 0.8 * registration.latencyMs;
       }
     };
   }
 
   private resetWeightedCredits(): void {
     if (this.algorithm !== Algorithm.WEIGHTED_ROUND_ROBIN) return;
-    for (const registration of this.registrations.values()) registration.credit = 0;
+    for (const registration of this.registrations.values())
+      registration.credit = 0;
     this.weightedEligible.clear();
   }
 
@@ -152,7 +191,11 @@ class ServerPool {
       // Preserve registration order and the existing cursor/health semantics.
       for (let checked = 0; checked < count; checked++) {
         const server = this.serverList[this.currentIndex]!;
-        this.currentIndex = Algorithms.getNextIndex(this.algorithm, this.currentIndex, count);
+        this.currentIndex = Algorithms.getNextIndex(
+          this.algorithm,
+          this.currentIndex,
+          count,
+        );
         if (this.healthMonitor.isEligible(server)) return server;
       }
       return null;
@@ -172,13 +215,21 @@ class ServerPool {
       }
       eligible.add(registration);
     }
-    if (this.algorithm === Algorithm.WEIGHTED_ROUND_ROBIN &&
-        (eligible.size !== this.weightedEligible.size ||
-         [...eligible].some(registration => !this.weightedEligible.has(registration)))) {
+    if (
+      this.algorithm === Algorithm.WEIGHTED_ROUND_ROBIN &&
+      (eligible.size !== this.weightedEligible.size ||
+        [...eligible].some(
+          (registration) => !this.weightedEligible.has(registration),
+        ))
+    ) {
       this.resetWeightedCredits();
       this.weightedEligible = eligible;
     }
-    const selected = Algorithms.select(this.algorithm, candidates, this.selectionCount + 1);
+    const selected = Algorithms.select(
+      this.algorithm,
+      candidates,
+      this.selectionCount + 1,
+    );
     if (!selected) return null;
     this.currentIndex = (selected.index + 1) % count;
     if (this.algorithm === Algorithm.LEAST_RESPONSE_TIME) {
