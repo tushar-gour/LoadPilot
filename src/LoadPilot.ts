@@ -174,6 +174,7 @@ class LoadPilot {
     }
     const queryIndex = target.indexOf("?");
     const pathname = queryIndex < 0 ? target : target.slice(0, queryIndex);
+    let settleSelection: ((headersMs?: number) => void) | undefined;
     try {
       const pool = routeMatcher.getServerPoolFromRoute(pathname, this.options.route, this.poolList);
       if (!pool) {
@@ -190,12 +191,14 @@ class LoadPilot {
         sendError(res, 503);
         return;
       }
+      settleSelection = pool.beginRequest(server);
       observe?.({ type: "selected", server });
       const path = this.options.route === "/" ? pathname : pathname.slice(this.options.route.length) || "/";
       const query = queryIndex < 0 ? "" : target.slice(queryIndex);
       this.proxy.forward(req, res, server, path + query, this.options.route,
-        () => pool.reportTransportFailure(server), observe);
+        () => pool.reportTransportFailure(server), observe, settleSelection);
     } catch {
+      settleSelection?.();
       req.resume();
       observe?.({ type: "rejected", reason: "internalErrors" });
       sendError(res, 500);

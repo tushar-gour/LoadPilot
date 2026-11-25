@@ -134,9 +134,9 @@ export class HttpProxy {
    * Deliberately returns void: every asynchronous event has a managed handler.
    */
   forward(req: IncomingMessage, res: ServerResponse, server: Server, path: string, baseRoute: string,
-    onTransportFailure?: () => void, observer?: ProxyObserver): void {
-    if (this.closing) { sendError(res, 503); return; }
-    const started = observer ? performance.now() : 0;
+    onTransportFailure?: () => void, observer?: ProxyObserver, onSettled?: (headersMs?: number) => void): void {
+    if (this.closing) { onSettled?.(); sendError(res, 503); return; }
+    const started = observer || onSettled ? performance.now() : 0;
     const backend = new URL(server.baseUrl);
     const upstreamPath = backend.pathname.replace(/\/+$/, "") + path;
     const headers = endToEndHeaders(req.headers);
@@ -162,9 +162,11 @@ export class HttpProxy {
     });
     let response: IncomingMessage | undefined;
     let settled = false;
-    const finish = () => {
+    let headersMs: number | undefined;
+    const finish = (completedHeadersMs?: number) => {
       if (settled) return;
       settled = true;
+      onSettled?.(completedHeadersMs);
       clearTimeout(deadline);
       this.active.delete(shutdownCancel);
       req.unpipe(upstream);
@@ -201,7 +203,7 @@ export class HttpProxy {
     res.once("finish", () => {
       if (settled) return;
       if (observer) notify(observer, { type: "completed" });
-      finish();
+      finish(headersMs);
     });
     res.once("close", () => { if (!res.writableFinished) clientCancel(); });
     upstream.once("error", (error: NodeJS.ErrnoException) => fail(502, transportErrors.has(error.code ?? "")));
@@ -218,7 +220,8 @@ export class HttpProxy {
         message.destroy();
         return;
       }
-      if (observer) notify(observer, { type: "response", statusCode: message.statusCode ?? 502, headersMs: performance.now() - started });
+      if (observer || onSettled) headersMs = performance.now() - started;
+      if (observer) notify(observer, { type: "response", statusCode: message.statusCode ?? 502, headersMs: headersMs! });
       try {
         const responseHeaders = endToEndHeaders(message.headers);
         if (responseHeaders.location !== undefined) {

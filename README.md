@@ -12,12 +12,12 @@ Client ← streamed status, headers and body ← HttpProxy ← backend
 
 - `LoadPilot` owns one HTTP or HTTPS listener, its sockets and admitted exchanges, an optional public base route and its pool registry, and exposes optional instance metrics.
 - `RouteMatcher` selects the longest matching pool route at complete path-segment boundaries. It has no networking or scheduling responsibilities.
-- `ServerPool` owns its backend list, Round Robin cursor and optional health monitor. Its default algorithm is `Algorithm.ROUND_ROBIN`.
+- `ServerPool` owns its backend list, scheduling state and optional health monitor. Six algorithms are supported; the default is `Algorithm.ROUND_ROBIN`.
 - `Server` represents a validated HTTP(S) destination, optionally including a path prefix. Credentials, query strings and fragments are rejected in backend configuration.
 - The internal `HttpProxy` manages transport, header filtering, redirects, streaming, deadlines and cancellation. It does not select backends.
 - An internal per-instance `MetricsCollector` observes the existing lifecycle through scoped callbacks. It makes no routing, selection or health decisions and has no global registry.
 
-Each pool starts with its first eligible backend and rotates through registration order. Health checks are disabled by default, preserving selection of all registered backends. An unrelated pool's requests do not advance its cursor. Different LoadPilot objects have independent listeners and registries. **Use distinct ServerPool objects for independent scheduling and health state**: intentionally sharing a pool object also shares its cursor, backend list and single health monitor.
+With the default Round Robin algorithm, each pool starts with its first eligible backend and rotates through registration order. Health checks are disabled by default, preserving selection of all registered backends. An unrelated pool's requests do not advance its cursor. Different LoadPilot objects have independent listeners and registries. **Use distinct ServerPool objects for independent scheduling and health state**: intentionally sharing a pool object also shares its cursor, backend list and single health monitor.
 
 ## Setup
 
@@ -92,6 +92,48 @@ await pilot.start();
 ```
 
 `route` defaults to `/`. `name` and `port` are required; port `0` requests an automatically allocated port, available through the read-only `pilot.port` getter after `start()`. That getter returns `null` while no listener is bound; `pilot.options.port` retains the configured value. Configuration is frozen after construction. Duplicate normalized pool routes are rejected; pools and backends can be added while running.
+
+## Load balancing algorithms
+
+Choose a strategy per pool. Backend weights are configured using the optional second argument to `Server`; omitted weights equal 1. Weights must be integers from 1 to 1,000,000.
+
+```ts
+import { Algorithm, LoadPilot, ServerPool, Server } from "loadpilot";
+
+const pilot = new LoadPilot({
+  name: "WeightedGateway", host: "127.0.0.1", port: 8080,
+  pools: [new ServerPool({
+    route: "/api",
+    algorithm: Algorithm.WEIGHTED_ROUND_ROBIN,
+    servers: [
+      new Server("http://127.0.0.1:3001", { weight: 5 }),
+      new Server("http://127.0.0.1:3002", { weight: 3 }),
+      new Server("http://127.0.0.1:3003", { weight: 2 }),
+    ],
+    healthCheck: { enabled: true },
+  })],
+});
+await pilot.start();
+```
+
+| Algorithm | Selection rule | Cost |
+|---|---|---|
+| `Algorithm.ROUND_ROBIN` | Rotate over registration slots, skipping unhealthy backends | O(1) if next slot is eligible, O(n) worst case |
+| `Algorithm.WEIGHTED_ROUND_ROBIN` | Smooth weighted rotation; increment eligible credits, choose highest, subtract total weight | O(n) |
+| `Algorithm.RANDOM` | Uniform random selection among eligible registration slots | O(n) |
+| `Algorithm.LEAST_CONNECTIONS` | Lowest outstanding proxied HTTP exchanges | O(n) |
+| `Algorithm.WEIGHTED_LEAST_CONNECTIONS` | Lowest outstanding exchanges / effective weight | O(n) |
+| `Algorithm.LEAST_RESPONSE_TIME` | Lowest exponentially weighted moving average of dispatch-to-response-header latency | O(n) |
+
+Here n is the number of backend registration slots. All strategies exclude confirmed UNHEALTHY entries, allow UNKNOWN entries and return 503 when no eligible backend exists. Ties use rotating registration order (least response time first breaks equal measured latency by active exchange count). Health probes never advance scheduling state or count as application requests. All strategies select once; no retry or request replay is introduced.
+
+Smooth Weighted Round Robin does not expand a weight into repeated array entries. It resets credits when the eligible set or registration topology changes. Repeated registration of the same Server object retains the documented slot semantics for Round Robin and Random; the weighted strategies use weight times registration count. Least Connections and Least Response Time share active/latency state across registrations of that same object. Distinct Server objects are independent even when their URLs match.
+
+For HTTP/1.x, "connections" in the two least-connections algorithms means in-flight proxied exchanges, not open/idle TCP sockets. A reservation is made synchronously after selection, and released exactly once on completion, upstream failure, timeout, client cancellation or shutdown. State is independent of optional metrics and is shared when two listeners deliberately share a pool. Removed backends stop receiving new traffic; a later re-add gets a fresh identity without inheriting the retired registration's requests or samples.
+
+Least Response Time measures elapsed monotonic time from proxy dispatch to upstream response headers, including connection setup, upload and upstream processing; it excludes downstream body delivery. Only completed exchanges with a valid header measurement update the EWMA (alpha 0.2, first sample initializes it); transport failures, timeouts and cancelled/incomplete responses do not update it. Valid backend HTTP error responses still count as measured responses. Idle unsampled eligible backends are explored first, and every 32nd selection probes the least recently selected eligible backend to refresh stale estimates. If every candidate is unsampled and busy, selection falls back to least active. This policy is not a guarantee of lower end-to-end latency; workload and measurement history matter.
+
+Weights are used only by the two weighted strategies. Pool state persists across listener stop/start, consistent with pool-owned cursor and registration lifetime; stopped requests release their reservations. Removing and re-adding the last registration resets that backend's state. Existing one-argument Server construction and Round Robin behavior are unchanged.
 
 ## Routing and upstream paths
 
@@ -282,7 +324,7 @@ Every health option is optional. **`enabled` defaults to false**, even when othe
 
 A success clears the failure counter; a failure clears the success counter. Diagnostic counters saturate at their respective thresholds. An interrupted recovery restarts the success streak. `pool.getHealthStatus()` returns frozen snapshots containing the Server object, state and both counters; disabled monitoring reports UNKNOWN rather than inventing confirmed health. There is no public HTTP diagnostics endpoint.
 
-The existing algorithm dispatcher advances over the original registration order, skipping confirmed unhealthy entries with a bounded scan. Recovery restores a backend to that order without resetting the pool's selection cursor. Probes never advance the cursor. If all entries are confirmed unhealthy, `getNextServer()` returns `null` and matching client requests receive the existing generic **503 Service Unavailable**, without forwarding or falling back to a less specific pool.
+Round Robin advances over the original registration order, skipping confirmed unhealthy entries with a bounded scan. Other strategies consider only eligible entries and apply their documented selection rule. Recovery restores backend eligibility; probes never advance scheduling state. If all entries are confirmed unhealthy, `getNextServer()` returns `null` and matching client requests receive the existing generic **503 Service Unavailable**, without forwarding or falling back to a less specific pool.
 
 Health changes affect **new selections only**. They do not cancel an application request already using that backend. Checks reduce failed selections but cannot guarantee that an upstream will remain available during a request, or that every application endpoint is healthy.
 
@@ -423,7 +465,7 @@ Prometheus/OpenTelemetry exporters, tracing, historical TCP connection metrics, 
 - HTTP Upgrade/WebSocket and CONNECT tunneling are rejected with 501. Unexpected upstream upgrades produce 502.
 - No cookie/body/refresh rewriting, forwarding of trailers or informational-response relay. Trusted proxy metadata uses only the documented bounded X-Forwarded policy.
 - Redirect rewriting requires an exact selected-backend origin and a path inside its configured prefix, as described above.
-- No automatic failover/retries, weighted scheduling, circuit breakers, external metrics exporters or clustering.
+- No automatic request retries, circuit breakers, external metrics exporters or clustering.
 - Graceful drain cannot guarantee availability during an exchange or delivery beyond the network stack; event-loop stalls delay timers. Omitted host retains Node's default bind address.
 
 ## Development and verification
