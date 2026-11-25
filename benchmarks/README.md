@@ -147,3 +147,17 @@ npm run bench:soak -- --mode extended --duration 1800 --warmup 2 --idle 15 --gc 
 ```
 
 The comparison runs all six algorithms in rotated order, using fresh separate processes and real HTTP. Profiles: uniform (equal weights/no intentional delay), weighted (5:3:2 weights), heterogeneous (5:3:2 weights and 2/10/40 ms application delay), unhealthy (same configuration with the third backend excluded before warmup). Health and metrics are enabled consistently. It records client throughput, latency, missed arrivals, actual backend distribution, CPU/memory and validates counts, health exclusion and zero tracked resources after shutdown. The report is local JSON in ignored `benchmarks/results/`; no measured comparison is claimed until execution. The extended soak command exercises the pre-existing mixed-workload retention harness; it is not an all-algorithm soak.
+
+
+## Memory sampling correction
+
+Both the periodic monitor and settled/post-GC checkpoint histories now retain the most recent observation per elapsed-time bucket, coarsening the full history uniformly as necessary. Early and late slopes use elapsed-time halves and equally weighted occupied time buckets. Missing half-window coverage yields Inconclusive; no warning thresholds were relaxed. Old reports cannot recreate deleted checkpoints and must not be reclassified as a clean pass. Correctness PASS is separate from memory classification.
+
+Reproduce the extended mixed-workload investigation with:
+
+```sh
+npm run bench:soak -- --mode extended --duration 1800 --warmup 2 --idle 15 --gc --label release-soak-v2
+npm run bench:memory -- --scenarios get,metrics,health-get --duration 120 --warmup 2 --idle 10 --gc --label release-isolation
+```
+
+The mixed harness exercises one backend and default Round Robin; other strategies have separate correctness/short comparative runs, not long-duration proof. Do not claim leak-freedom even if the diagnostic is favorable.

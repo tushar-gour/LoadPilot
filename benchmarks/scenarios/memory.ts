@@ -3,6 +3,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { createHash } from "node:crypto";
 import { Environment, accounting } from "../helpers/environment.js";
 import { memoryTrend } from "../helpers/analysis.js";
+import { TimeSeries } from "../helpers/timeSeries.js";
 import { waitFor } from "../helpers/processes.js";
 import { Histogram, hashBytes, smallPayload } from "../helpers/statistics.js";
 import type { BackendStats, DiagnosticCheckpoint, LoadOptions, MemoryRun, Resources, ResourceState } from "../types.js";
@@ -28,12 +29,16 @@ export async function memoryExperiment(scenario: string, options: MemoryOptions,
     sampleMs: options.sampleMs, timeoutMs: 1000, upstreamKeepAlive: keepAlive });
   onEnvironment?.(environment);
   const started = performance.now(), checkpoints: DiagnosticCheckpoint[] = [], histogram = new Histogram();
+  const settledSeries = new TimeSeries<DiagnosticCheckpoint>(Math.max(1, options.durationMs / 256));
+  const gcSeries = new TimeSeries<DiagnosticCheckpoint>(Math.max(1, options.durationMs / 256));
   let attempted = 0, completed = 0, failed = 0, cancelled = 0, batches = 0;
   const checkpoint = async (label: string) => {
     const value = await environment.proxy.call<Omit<DiagnosticCheckpoint, "label" | "elapsedMs">>("diagnostics");
     const point = { ...value, label, elapsedMs: performance.now() - started };
-    if (checkpoints.length >= 600) checkpoints.splice(5, checkpoints.length - 5, ...checkpoints.slice(5).filter((_, index) => index % 2 === 0));
-    checkpoints.push(point); return point;
+    if (label === "settled") settledSeries.add(point);
+    else if (label === "settled-GC") gcSeries.add(point);
+    else checkpoints.push(point);
+    return point;
   };
   try {
     await checkpoint("startup");
@@ -95,9 +100,8 @@ export async function memoryExperiment(scenario: string, options: MemoryOptions,
         if (kind === "restart") { await environment.restartProxy(); if (healthEnabled) await environment.healthy(); }
       }
       batches++;
-      await environment.quiet(); await sleep(100); await checkpoint("settled");
-      if (options.gc && options.gcDuringLoad !== false) { await environment.proxy.call("gc"); await checkpoint("settled-GC"); }
-      const current = checkpoints.at(-1)!;
+      await environment.quiet(); await sleep(100); let current = await checkpoint("settled");
+      if (options.gc && options.gcDuringLoad !== false) { await environment.proxy.call("gc"); current = await checkpoint("settled-GC"); }
       assert.equal(current.sample.activeRequests, 0); assert.equal(current.sample.activeUpstreamExchanges, 0);
       assert.equal(current.sample.agentPendingRequests, 0);
       assert.equal(current.metricScopes?.active, 0); assert.equal(current.metricScopes?.retiredActive, 0);
@@ -121,7 +125,9 @@ export async function memoryExperiment(scenario: string, options: MemoryOptions,
     await checkpoint("stopped");
     const backendStats = await Promise.all(environment.backends.map((worker) => worker.call<BackendStats>("stats")));
     assert.ok(backendStats.every((stats) => stats.unexpectedErrors === 0));
-    const settled = checkpoints.filter((point) => point.label === (options.gc && options.gcDuringLoad !== false ? "settled-GC" : "settled"));
+    const settled = (options.gc && options.gcDuringLoad !== false ? gcSeries : settledSeries).values();
+    checkpoints.push(...settledSeries.values(), ...gcSeries.values());
+    checkpoints.sort((a,b) => a.elapsedMs-b.elapsedMs);
     return { scenario, metricsEnabled, healthEnabled, keepAlive, configuredDurationMs: options.durationMs, actualLoadMs,
       actualTotalMs: performance.now() - started, batches, attempted, completed, failed, cancelled, upstreamTimeouts: metrics?.requests.upstreamTimeouts ?? null,
       latencyMs: histogram.snapshot(), checkpoints, resources, clientResources, backendResources, backendStats,

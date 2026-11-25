@@ -1,12 +1,19 @@
 {
   "name": "loadpilot",
   "version": "0.1.0",
-  "description": "Composable HTTP load balancing for Node.js (early development).",
+  "description": "Composable HTTP(S) load balancer and reverse proxy for Node.js",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "files": ["dist"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc",
@@ -24,12 +31,30 @@
     "bench:soak": "tsx benchmarks/investigate.ts soak",
     "check:package": "tsc --ignoreConfig --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --types node tests/package-consumer.mts && tsx tests/package-consumer.mts"
   },
-  "keywords": ["load-balancer", "reverse-proxy", "http", "round-robin"],
+  "keywords": [
+    "load-balancer",
+    "reverse-proxy",
+    "http",
+    "https",
+    "round-robin",
+    "health-check",
+    "least-connections"
+  ],
   "license": "ISC",
-  "engines": { "node": ">=22.19.0" },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "devDependencies": {
     "@types/node": "^24.19.2",
     "typescript": "^7.0.2",
     "tsx": "^4.23.15"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tushar-gour/LoadPilot.git"
+  },
+  "homepage": "https://github.com/tushar-gour/LoadPilot#readme",
+  "bugs": {
+    "url": "https://github.com/tushar-gour/LoadPilot/issues"
   }
 }
