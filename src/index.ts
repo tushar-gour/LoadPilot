@@ -10,6 +10,7 @@ export type { ServerPoolOptions } from "./server/ServerPool.js";
 export { Server } from "./server/Server.js";
 export type { ServerOptions } from "./server/Server.js";
 export { Algorithm } from "./algorithms/Algorithms.js";
+export type { CustomAlgorithm, CustomAlgorithmCandidate, CustomAlgorithmFactory } from "./algorithms/CustomAlgorithm.js";
 export { HealthState } from "./health/HealthCheck.js";
 export type {
   HealthCheckOptions,

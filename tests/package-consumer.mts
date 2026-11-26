@@ -7,7 +7,10 @@ import { readFile } from "node:fs/promises";
 import { once } from "node:events";
 import { setTimeout as sleep } from "node:timers/promises";
 import { LoadPilot, ServerPool, Server, Algorithm, HealthState } from "loadpilot";
-import type { LoadPilotOptions, HealthCheckOptions, LoadPilotMetrics, ListenerTlsOptions, StopOptions, LoadPilotStatus, ServerOptions } from "loadpilot";
+import type { CustomAlgorithm, CustomAlgorithmCandidate, LoadPilotOptions, HealthCheckOptions, LoadPilotMetrics, ListenerTlsOptions, StopOptions, LoadPilotStatus, ServerOptions } from "loadpilot";
+class FirstEligible implements CustomAlgorithm {
+  select(candidates: readonly CustomAlgorithmCandidate[]): number | undefined { return candidates[0]?.id; }
+}
 const weight: ServerOptions = { weight: 2 };
 for (const algorithm of Object.values(Algorithm)) {
   const server = new Server("http://127.0.0.1:3001", weight);
@@ -30,7 +33,7 @@ try {
     const options: LoadPilotOptions = { name: "built-package", host: "127.0.0.1", port: 0, tls: protocol === "https" ? tls : undefined,
       trustedProxies: ["127.0.0.1/32"], metrics: { enabled: true }, pools: [
       new ServerPool({ route: "/http", algorithm: Algorithm.ROUND_ROBIN, servers: [new Server(`http://127.0.0.1:${a.port}`)], healthCheck: health }),
-      new ServerPool({ route: "/tls", servers: [new Server(`https://localhost:${b.port}`)], healthCheck: health }),
+      new ServerPool({ route: "/tls", customAlgorithm: () => new FirstEligible(), servers: [new Server(`https://localhost:${b.port}`)], healthCheck: health }),
     ] };
     pilot = new LoadPilot(options);
     for (let cycle = 0; cycle < 2; cycle++) {

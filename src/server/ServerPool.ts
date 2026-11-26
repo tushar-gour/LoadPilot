@@ -1,4 +1,6 @@
 import { Algorithm, createAlgorithm } from "../algorithms/Algorithms.js";
+import { CustomAlgorithmAdapter } from "../algorithms/CustomAlgorithmAdapter.js";
+import type { CustomAlgorithmFactory } from "../algorithms/CustomAlgorithm.js";
 import { PoolScheduler } from "./PoolScheduler.js";
 import type { BackendRegistration, Registration } from "./BackendRegistration.js";
 export type { BackendRegistration } from "./BackendRegistration.js";
@@ -20,13 +22,17 @@ export interface ServerPoolOptions {
   route: string;
   servers?: readonly Server[];
   algorithm?: Algorithm;
+  /** Optional per-pool custom strategy factory; mutually exclusive with algorithm. */
+  customAlgorithm?: CustomAlgorithmFactory;
   healthCheck?: HealthCheckOptions;
 }
 
 /** Owns its backend list and independent scheduling state. */
 class ServerPool {
   readonly route: string;
+  /** Configured built-in algorithm (default Round Robin); see usesCustomAlgorithm for custom pools. */
   readonly algorithm: Algorithm;
+  readonly usesCustomAlgorithm: boolean;
   readonly healthCheck: HealthCheckConfiguration;
   private readonly serverList: Server[];
   private readonly healthMonitor: HealthMonitor;
@@ -37,7 +43,12 @@ class ServerPool {
   constructor(options: ServerPoolOptions) {
     this.route = normalizeRoute(options.route);
     this.algorithm = options.algorithm ?? Algorithm.ROUND_ROBIN;
-    const strategy = createAlgorithm(this.algorithm);
+    this.usesCustomAlgorithm = options.customAlgorithm !== undefined;
+    if (this.usesCustomAlgorithm && options.algorithm !== undefined)
+      throw new Error("Specify either algorithm or customAlgorithm, not both.");
+    const strategy = options.customAlgorithm === undefined
+      ? createAlgorithm(this.algorithm)
+      : new CustomAlgorithmAdapter(options.customAlgorithm);
     this.serverList = [...(options.servers ?? [])];
     this.healthCheck = resolveHealthCheck(options.healthCheck);
     this.healthMonitor = new HealthMonitor(this.healthCheck);

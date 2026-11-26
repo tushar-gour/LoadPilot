@@ -1,3 +1,4 @@
+import { HealthTransitionPolicy, type HealthTransitionState } from "./HealthTransitionPolicy.js";
 import { HttpHealthProbe } from "./HttpHealthProbe.js";
 import type { Server } from "../server/Server.js";
 import {
@@ -26,11 +27,8 @@ function probeCounters(): ProbeCounters {
   };
 }
 
-interface BackendRecord {
+interface BackendRecord extends HealthTransitionState {
   readonly server: Server;
-  state: HealthState;
-  consecutiveSuccesses: number;
-  consecutiveFailures: number;
   timer?: ReturnType<typeof setTimeout>;
   cancel?: () => void;
   metrics?: ProbeCounters;
@@ -44,7 +42,11 @@ export class HealthMonitor {
   private metricsEnabled = false;
   private readonly totals = probeCounters();
 
-  constructor(private readonly options: HealthCheckConfiguration) {}
+  private readonly policy: HealthTransitionPolicy;
+
+  constructor(private readonly options: HealthCheckConfiguration) {
+    this.policy = new HealthTransitionPolicy(options);
+  }
 
   enableMetrics(): void {
     if (this.metricsEnabled) return;
@@ -99,10 +101,8 @@ export class HealthMonitor {
     if (this.owners.size !== 1) return;
     for (const record of this.records.values()) {
       const previousState = record.state;
-      record.state = HealthState.UNKNOWN;
+      this.policy.reset(record);
       if (previousState !== record.state) this.recordTransition(record);
-      record.consecutiveSuccesses = 0;
-      record.consecutiveFailures = 0;
       this.schedule(record, 0);
     }
   }
@@ -175,27 +175,7 @@ export class HealthMonitor {
     timedOut: boolean,
   ): void {
     const previousState = record.state;
-    if (success) {
-      record.consecutiveFailures = 0;
-      record.consecutiveSuccesses = Math.min(
-        record.consecutiveSuccesses + 1,
-        this.options.healthyThreshold,
-      );
-      if (
-        record.state !== HealthState.UNHEALTHY ||
-        record.consecutiveSuccesses >= this.options.healthyThreshold
-      ) {
-        record.state = HealthState.HEALTHY;
-      }
-    } else {
-      record.consecutiveSuccesses = 0;
-      record.consecutiveFailures = Math.min(
-        record.consecutiveFailures + 1,
-        this.options.unhealthyThreshold,
-      );
-      if (record.consecutiveFailures >= this.options.unhealthyThreshold)
-        record.state = HealthState.UNHEALTHY;
-    }
+    this.policy.apply(record, success);
     if (record.metrics) {
       const key = success ? "successfulProbes" : "failedProbes";
       record.metrics[key]++;

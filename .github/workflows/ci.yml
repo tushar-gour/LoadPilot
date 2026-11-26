@@ -36,3 +36,14 @@ jobs:
       - name: Six-strategy benchmark smoke
         if: matrix.os == 'ubuntu-latest' && matrix.node == '24.x'
         run: npm run bench:algorithms -- --profiles uniform,unhealthy --duration 0.2 --warmup 0.1 --concurrency 8 --repetitions 1 --label ci-algorithms
+      - name: Matched baseline comparison for v0.2.0
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24.x' && github.event_name == 'pull_request' && github.head_ref == 'feat/custom-algorithm-release'
+        shell: bash
+        run: |
+          git fetch --no-tags origin 11468b6b78ac900a035b65f090eb4b453fcb5aa2
+          baseline="$RUNNER_TEMP/loadpilot-baseline"
+          git worktree add --detach "$baseline" 11468b6b78ac900a035b65f090eb4b453fcb5aa2
+          trap 'git worktree remove --force "$baseline"' EXIT
+          (cd "$baseline" && npm ci && npm run bench:algorithms -- --profiles uniform,heterogeneous --duration 0.5 --warmup 0.25 --concurrency 20 --repetitions 2 --label paired-baseline)
+          npm run bench:algorithms -- --profiles uniform,heterogeneous --duration 0.5 --warmup 0.25 --concurrency 20 --repetitions 2 --label paired-candidate
+          npm run bench:compare-algorithms -- "$baseline/benchmarks/results/paired-baseline.json" benchmarks/results/paired-candidate.json

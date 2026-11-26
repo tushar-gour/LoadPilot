@@ -1,16 +1,15 @@
-# Initial release checklist
+# Release checklist
 
-Release candidate: 0.1.0 (early-stage library). The package already declares ISC; the root LICENSE makes that declaration explicit.
+Release candidate: 0.2.0. The v0.1.0 package was the initial public release. This minor release adds public per-pool custom scheduling, isolates health transition policy and metrics snapshot assembly, and includes the prior architecture refactor.
 
 ## Before publication
 
-- [ ] Inspect all refs/history for secrets with a dedicated scanner (e.g. Gitleaks), including removed files; review every finding and rotate real credentials.
-- [ ] Verify fixture keys are synthetic and not reused. Review repository metadata, issues, PRs, Actions logs and artifacts for sensitive material before public visibility.
-- [ ] Pass typecheck, automated tests, build, package-consumer check, pack dry run, and npm audit.
-- [ ] Repeat extended soak with corrected time sampling; publish the measured classification and limitations, not a leak-free claim.
-- [ ] Verify npm package name and publisher access; if occupied, choose a scoped package and update imports/docs/lockfile together.
-- [ ] Review the generated npm archive and ensure only distribution output, license, README and package metadata are shipped.
-- [ ] Make repository public using GitHub settings only after review.
+- [ ] Inspect all refs/history for secrets with a dedicated scanner (e.g. Gitleaks), including removed files; review findings and rotate real credentials.
+- [ ] Confirm fixture keys are synthetic and not reused. Review repository metadata, issues, PRs, Actions logs and artifacts.
+- [ ] Pass the six CI jobs, local typecheck, tests, build, package-consumer check, pack dry run, and npm audit.
+- [ ] Review matched-workload post-refactor benchmark evidence. Historical benchmark results are tied to their recorded commits; short comparisons are not production capacity or memory certification.
+- [ ] Verify the exact release version is unpublished and the authenticated npm user has publisher access.
+- [ ] Review generated npm archive; only distribution output, license, README and package metadata should ship.
 
 ```sh
 git fetch origin
@@ -27,6 +26,15 @@ npm whoami
 npm publish --dry-run
 ```
 
-An npm E404 for the public package is not a guarantee that a name can be registered; check ownership and npm policy. Authenticate locally with npm's supported publishing process and MFA; do not commit tokens. Once the gates pass, run `npm publish --access public` and verify `npm view loadpilot@0.1.0 version`. Create the matching GitHub v0.1.0 release from the verified commit, including limitations and evidence. Do not republish or overwrite an existing version.
+After verification, publish with npm's supported MFA process:
 
-The 30-minute soak submitted for the earlier commit passed correctness checks, but its retained checkpoint distribution was incomplete. A new run is required for the corrected diagnostic.
+```sh
+npm publish --access public
+npm view loadpilot@0.2.0 version
+```
+
+If npm stages publication, review and approve the staged version using the authenticated npm account. Verify that 0.2.0 is the operational public version, then create the matching GitHub v0.2.0 release from the verified commit. Never overwrite existing npm versions or publish credentials.
+
+## Performance and reliability evidence
+
+The 30-minute v0.1.0 rerun with corrected sampling completed and passed correctness and resource cleanup; the memory classifier was inconclusive, not a leak-free result. The refactor and v0.2.0 require their own evidence. See benchmarks/README.md and ARCHITECTURE.md.
