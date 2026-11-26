@@ -1,6 +1,6 @@
 {
   "name": "loadpilot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Composable HTTP(S) load balancer and reverse proxy for Node.js",
   "type": "module",
   "main": "./dist/index.js",
@@ -17,7 +17,7 @@
   "scripts": {
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc",
-    "test": "tsx --test tests/test.ts tests/proxy.test.ts tests/health.test.ts tests/metrics.test.ts tests/reliability.test.ts tests/memory-reliability.test.ts tests/lifecycle.test.ts tests/tls.test.ts tests/proxy-security.test.ts tests/algorithms.test.ts tests/architecture.test.ts",
+    "test": "tsx --test tests/test.ts tests/proxy.test.ts tests/health.test.ts tests/metrics.test.ts tests/reliability.test.ts tests/memory-reliability.test.ts tests/lifecycle.test.ts tests/tls.test.ts tests/proxy-security.test.ts tests/algorithms.test.ts tests/architecture.test.ts tests/custom-algorithms.test.ts tests/health-policy.test.ts",
     "typecheck": "tsc -p tsconfig.bench.json",
     "prepack": "npm run build",
     "bench": "tsx benchmarks/run.ts bench",
@@ -29,7 +29,8 @@
     "bench:memory": "tsx benchmarks/investigate.ts memory",
     "bench:capacity": "tsx benchmarks/investigate.ts capacity",
     "bench:soak": "tsx benchmarks/investigate.ts soak",
-    "check:package": "tsc --ignoreConfig --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --types node tests/package-consumer.mts && tsx tests/package-consumer.mts"
+    "check:package": "tsc --ignoreConfig --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --types node tests/package-consumer.mts && tsx tests/package-consumer.mts",
+    "bench:compare-algorithms": "node benchmarks/compare-algorithms.mjs"
   },
   "keywords": [
     "load-balancer",

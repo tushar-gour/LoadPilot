@@ -133,7 +133,40 @@ For HTTP/1.x, "connections" in the two least-connections algorithms means in-fli
 
 Least Response Time measures elapsed monotonic time from proxy dispatch to upstream response headers, including connection setup, upload and upstream processing; it excludes downstream body delivery. Only completed exchanges with a valid header measurement update the EWMA (alpha 0.2, first sample initializes it); transport failures, timeouts and cancelled/incomplete responses do not update it. Valid backend HTTP error responses still count as measured responses. Idle eligible backends that have never been selected get one initial opportunity. After those initial selections, every 32nd selection chooses the least recently selected eligible backend to refresh stale estimates. A failed initial request does not grant endless cold-start priority. If every candidate is unsampled and busy, selection falls back to least active. This policy is not a guarantee of lower end-to-end latency; workload and measurement history matter.
 
-Weights are used only by the two weighted strategies. Pool state persists across listener stop/start, consistent with pool-owned cursor and registration lifetime; stopped requests release their reservations. Removing and re-adding the last registration resets that backend's state. Existing one-argument Server construction and Round Robin behavior are unchanged.
+Among the built-in strategies, weights are used only by the two weighted strategies. Pool state persists across listener stop/start, consistent with pool-owned cursor and registration lifetime; stopped requests release their reservations. Removing and re-adding the last registration resets that backend's state. Existing one-argument Server construction and Round Robin behavior are unchanged.
+
+## Custom load balancing algorithms (v0.2.0)
+
+Implement the public CustomAlgorithm interface in your own application and pass a factory to ServerPool. No edits to LoadPilot or global registry are required.
+
+```ts
+import { ServerPool, Server, type CustomAlgorithm, type CustomAlgorithmCandidate } from "loadpilot";
+
+class HighestCapacityFirst implements CustomAlgorithm {
+  select(candidates: readonly CustomAlgorithmCandidate[]): number | undefined {
+    return candidates.reduce<CustomAlgorithmCandidate | undefined>((best, candidate) =>
+      !best || candidate.weight * candidate.registrations / (candidate.activeRequests + 1) >
+        best.weight * best.registrations / (best.activeRequests + 1) ? candidate : best,
+      undefined)?.id;
+  }
+}
+
+const pool = new ServerPool({
+  route: "/api",
+  customAlgorithm: () => new HighestCapacityFirst(),
+  servers: [new Server("http://127.0.0.1:3001", { weight: 3 }),
+            new Server("http://127.0.0.1:3002")],
+  healthCheck: { enabled: true },
+});
+```
+
+- Use either algorithm (a built-in enum) or customAlgorithm (a factory), not both. Existing enum values and the ServerPool.algorithm property retain their original type and default; usesCustomAlgorithm identifies the override.
+- The factory runs once per pool and must return a fresh object implementing select(). The same instance cannot be attached to another pool. Sharing the pool intentionally shares the strategy.
+- select() receives an immutable array of immutable eligible backend snapshots, in rotating registration order, deduplicated by continuous Server registration identity. Snapshots contain id, baseUrl, weight, registrations, activeRequests and latencyMs. Duplicate registrations of one Server share an ID; distinct Server objects at the same URL do not. Removing the final registration and re-adding creates a new ID.
+- Return one candidate ID synchronously. Returning undefined declines the request (503); no eligible candidates also yield 503 and skip the callback. Invalid IDs, thrown errors or reentrant/membership-changing selections fail closed (generic 500 when forwarding). There is no fallback or retry.
+- Counts and EWMA samples work without enabling metrics. They are updated by LoadPilot, not the strategy. Only a successfully completed exchange contributes a valid header-latency sample; failures and cancellations release the reservation without recording a sample. The built-in EWMA alpha is 0.2.
+- Snapshots are point-in-time data, not live records. Strategy code is trusted, synchronous application code: do not block the event loop, perform asynchronous I/O, retain unbounded snapshots or mutate the pool from select(). This is not a sandbox.
+- The six built-ins retain their existing selection semantics; the custom path intentionally pays an O(n) snapshot cost. No runtime dependencies are added.
 
 ## Routing and upstream paths
 

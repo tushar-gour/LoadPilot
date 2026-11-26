@@ -9,6 +9,8 @@ export interface SchedulingState {
 }
 export interface SchedulingCandidate {
   readonly index: number;
+  readonly backendId: number;
+  readonly baseUrl: string;
   readonly state: SchedulingState;
 }
 export interface SelectionContext {

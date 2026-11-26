@@ -1,7 +1,7 @@
 import type { ServerResponse } from "node:http";
-import { HealthState } from "../health/HealthCheck.js";
+import { poolSnapshot } from "./poolSnapshot.js";
 import type { ServerPool } from "../server/ServerPool.js";
-import type { BackendMetrics, LoadPilotMetrics, MetricsOptions, PoolMetrics } from "./MetricsTypes.js";
+import type { LoadPilotMetrics, MetricsOptions } from "./MetricsTypes.js";
 import type { RequestObserver } from "./MetricEvents.js";
 import { MetricGroup } from "./MetricGroup.js";
 import { PoolMetricGroup } from "./PoolMetricGroup.js";
@@ -84,60 +84,10 @@ export class MetricsCollector {
       instrumentationErrors: this.instrumentationErrors,
       pools: Object.freeze(
         Array.from(this.pools, ([pool, group]) =>
-          this.poolSnapshot(pool, group),
+          poolSnapshot(pool, group),
         ),
       ),
     });
   }
 
-  private poolSnapshot(pool: ServerPool, group: PoolMetricGroup): PoolMetrics {
-    const registrations = pool.getBackendRegistrations();
-    const current = new Set(registrations);
-    const eligibility = {
-      registered: registrations.length,
-      registrations: 0,
-      unknown: 0,
-      healthy: 0,
-      unhealthy: 0,
-      eligible: 0,
-    };
-    const backends: BackendMetrics[] = registrations.map((registration) => {
-      const health = pool.getBackendHealthMetrics(registration.server);
-      eligibility.registrations += registration.registrations;
-      if (health?.state === HealthState.HEALTHY) eligibility.healthy++;
-      else if (health?.state === HealthState.UNHEALTHY) eligibility.unhealthy++;
-      else eligibility.unknown++;
-      if (!pool.healthCheck.enabled || health?.state !== HealthState.UNHEALTHY)
-        eligibility.eligible++;
-      return Object.freeze({
-        ...group.backend(registration).snapshot(),
-        id: registration.id,
-        baseUrl: registration.server.baseUrl,
-        registered: true,
-        registrations: registration.registrations,
-        health: health ?? null,
-      });
-    });
-    for (const backend of group.activeBackends) {
-      if (!current.has(backend.registration)) {
-        backends.push(
-          Object.freeze({
-            ...backend.snapshot(),
-            id: backend.registration.id,
-            baseUrl: backend.registration.server.baseUrl,
-            registered: false,
-            registrations: 0,
-            health: null,
-          }),
-        );
-      }
-    }
-    return Object.freeze({
-      ...group.snapshot(),
-      route: pool.route,
-      eligibility: Object.freeze(eligibility),
-      health: pool.getHealthMetrics(),
-      backends: Object.freeze(backends),
-    });
-  }
 }
